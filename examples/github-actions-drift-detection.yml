@@ -1,0 +1,51 @@
+name: Metabase drift detection
+
+# Runs nightly. If someone edited a card or dashboard directly in the Metabase
+# UI, the export diff will surface it as a PR for review.
+#
+# Required secrets / vars:
+#   METABASE_URL          (variable)
+#   METABASE_API_KEY      (secret)
+#   DRIFT_PR_TOKEN        (secret — a fine-grained PAT with PR write access)
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # 06:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install metabase-sync
+        run: uv tool install metabase-sync
+
+      - name: Export live state
+        working-directory: infrastructure/metabase
+        env:
+          METABASE_URL: ${{ vars.METABASE_URL }}
+          METABASE_API_KEY: ${{ secrets.METABASE_API_KEY }}
+        run: metabase-sync export
+
+      - name: Open PR if anything changed
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.DRIFT_PR_TOKEN }}
+          commit-message: "chore: nightly metabase drift snapshot"
+          branch: metabase-drift/${{ github.run_id }}
+          title: "Metabase drift: changes made via the UI"
+          body: |
+            Nightly export turned up changes that aren't in `main`.
+
+            Review the diff. If it's intentional, merge. If it's the work of
+            an unauthorised edit, undo it via the UI (and consider rotating
+            the API key).
+          delete-branch: true

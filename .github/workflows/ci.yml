@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint + format check (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --all-groups
+      - name: ruff check
+        run: uv run ruff check src tests
+      - name: ruff format --check
+        run: uv run ruff format --check src tests
+
+  typecheck:
+    name: Type check (pyright on src/)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --all-groups
+      - name: pyright
+        run: uv run pyright src
+
+  unit:
+    name: Unit tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Set Python ${{ matrix.python }}
+        run: uv python install ${{ matrix.python }}
+      - name: Sync dependencies
+        run: uv sync --all-groups --python ${{ matrix.python }}
+      - name: Run unit tests
+        run: uv run --python ${{ matrix.python }} pytest tests/ -v --ignore=tests/integration
+
+  integration:
+    name: Integration tests (pinned)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --all-groups
+      - name: Run integration tests against the pinned Metabase tag
+        run: uv run pytest tests/integration -v -m integration --tb=short
+        timeout-minutes: 15
+
+  integration-compat:
+    name: Integration tests (metabase:${{ matrix.metabase }}, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        metabase:
+          - "v0.55.16"
+          - "v0.58.7"
+          - "v0.60.1"
+          - "latest"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --all-groups
+      - name: Run integration tests against metabase:${{ matrix.metabase }}
+        env:
+          METABASE_VERSION: ${{ matrix.metabase }}
+        run: uv run pytest tests/integration -v -m integration --tb=short
+        timeout-minutes: 15
+
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7

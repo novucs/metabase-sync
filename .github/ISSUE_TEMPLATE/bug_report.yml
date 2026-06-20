@@ -1,0 +1,62 @@
+name: Bug report
+description: Something went wrong while running metabase-sync.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug.
+
+        Before submitting, please run `metabase-sync diagnose` and paste the
+        output below. That single command captures the tool version, Python
+        version, Metabase version, and your state tree's resource counts —
+        99% of what we'd ask for in triage.
+
+  - type: textarea
+    id: diagnose
+    attributes:
+      label: "`metabase-sync diagnose` output"
+      description: "Paste the output here. It's safe — the API key is auto-redacted."
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command you ran
+      description: "e.g. `metabase-sync apply --only cards`"
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected to happen
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened
+      description: Include the full error message / stack trace.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: plan_json
+    attributes:
+      label: "`state/.plan.json` (optional)"
+      description: |
+        If the issue is around plan/apply output: paste the relevant slice of
+        `.plan.json`. Strip anything sensitive before posting.
+      render: json
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional notes
+      description: Anything else you'd like us to know.

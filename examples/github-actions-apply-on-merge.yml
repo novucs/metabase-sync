@@ -1,0 +1,38 @@
+name: Metabase apply
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infrastructure/metabase/state/**"
+
+# Prevent two apply runs racing each other.
+concurrency:
+  group: metabase-apply
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    # Require a manual approval before this job runs. Configure the `production`
+    # environment in repo settings → Environments → "production".
+    environment:
+      name: production
+      url: ${{ secrets.METABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install metabase-sync
+        run: uv tool install metabase-sync
+
+      - name: Apply
+        working-directory: infrastructure/metabase
+        env:
+          METABASE_URL: ${{ secrets.METABASE_URL }}
+          METABASE_API_KEY: ${{ secrets.METABASE_API_KEY }}
+        run: metabase-sync apply

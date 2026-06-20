@@ -1,0 +1,61 @@
+name: Metabase plan
+
+on:
+  pull_request:
+    paths:
+      - "infrastructure/metabase/state/**"
+      - "infrastructure/metabase/.env.example"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install metabase-sync
+        run: uv tool install metabase-sync
+
+      - name: Plan
+        id: plan
+        working-directory: infrastructure/metabase
+        env:
+          METABASE_URL: ${{ secrets.METABASE_URL }}
+          METABASE_API_KEY: ${{ secrets.METABASE_API_KEY }}
+        run: |
+          set -o pipefail
+          metabase-sync plan | tee /tmp/plan.txt
+
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('/tmp/plan.txt', 'utf8');
+            const body = ['### Metabase plan', '', '```', plan.trim(), '```'].join('\n');
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const existing = comments.find(c => c.user.type === 'Bot' && c.body.startsWith('### Metabase plan'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                comment_id: existing.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            }

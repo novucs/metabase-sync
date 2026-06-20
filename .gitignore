@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.venv/
+.python-version
+
+# Build
+build/
+dist/
+*.whl
+*.tar.gz
+
+# uv
+.uv-cache/
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local state / secrets
+.env
+.env.local
+state/.plan.json
+state/.last-apply.json
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store

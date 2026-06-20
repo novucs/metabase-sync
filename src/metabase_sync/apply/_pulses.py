@@ -1,0 +1,183 @@
+"""Apply pulses (dashboard subscriptions).
+
+Recipient resolution is intentionally split from the payload build so the
+caller decides what to do with missing recipients: warn during plan, error
+during apply unless `--allow-missing-recipients` is set.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any
+
+from metabase_sync.diff import RemoteIndex
+from metabase_sync.plan import Change
+from metabase_sync.serialize.pulses import read_pulses
+from metabase_sync.serialize.yamlio import write_yaml
+
+from ._shared import ApplyContext, diff_fields, resolve_card_path, summarize_diffs
+
+log = logging.getLogger(__name__)
+
+
+def apply_pulses(ctx: ApplyContext) -> None:
+    for path, doc in read_pulses(ctx.state_dir):
+        relpath = str(path.relative_to(ctx.state_dir))
+        eid = doc.get("entity_id")
+
+        collection_slug = doc.get("collection_slug")
+        collection_id = None
+        if collection_slug:
+            collection_dir = (ctx.state_dir / "collections" / collection_slug).resolve()
+            collection_id = ctx.collection_id_by_disk_path.get(collection_dir)
+
+        dashboard_path_str = doc.get("dashboard_path")
+        dashboard_id = None
+        if dashboard_path_str:
+            dashboard_yaml = (path.parent / dashboard_path_str).resolve()
+            dashboard_id = ctx.dashboard_id_by_disk_path.get(dashboard_yaml.parent)
+
+        remote_pulse = (
+            ctx.remote.pulses_by_entity.get(eid)
+            if eid
+            else _find_by_dashboard_and_name(ctx.remote, dashboard_id, doc["name"])
+        )
+
+        desired, missing_recipients = _build_pulse_payload(
+            doc, path, collection_id, dashboard_id, ctx.card_id_by_disk_path, ctx.remote
+        )
+
+        if missing_recipients:
+            if ctx.mode == "plan":
+                log.warning(
+                    "pulse %s references %d recipient(s) with no matching user "
+                    "on the target — apply will error unless "
+                    "--allow-missing-recipients is passed.",
+                    relpath,
+                    len(missing_recipients),
+                )
+            elif ctx.mode == "apply" and not ctx.allow_missing_recipients:
+                lines = "\n".join(
+                    f"  pulse '{name}': {email}" for name, email in missing_recipients
+                )
+                raise SystemExit(
+                    "pulse recipient(s) have no matching user on the target instance:\n"
+                    f"{lines}\n"
+                    "  rerun with --allow-missing-recipients to silently drop them, "
+                    "or create the user(s) on the target first."
+                )
+
+        if remote_pulse is None:
+            ctx.plan.add(
+                Change(
+                    resource="pulses",
+                    action="create",
+                    relpath=relpath,
+                    name=doc["name"],
+                    summary=f"{doc['name']} → {len(desired.get('channels') or [])} channel(s)",
+                )
+            )
+            if ctx.mode == "apply":
+                created = ctx.client.post("/api/pulse", desired)
+                doc["entity_id"] = created.get("entity_id")
+                write_yaml(path, doc)
+            continue
+
+        diffs = diff_fields(
+            desired,
+            remote_pulse,
+            ("name", "collection_id", "dashboard_id", "skip_if_empty"),
+        )
+        if diffs:
+            ctx.plan.add(
+                Change(
+                    resource="pulses",
+                    action="update",
+                    relpath=relpath,
+                    name=doc["name"],
+                    summary=summarize_diffs(diffs),
+                    details={"changes": diffs},
+                )
+            )
+            if ctx.mode == "apply":
+                ctx.client.put(f"/api/pulse/{remote_pulse['id']}", desired)
+        else:
+            ctx.plan.add(
+                Change(
+                    resource="pulses", action="skip", relpath=relpath, name=doc["name"]
+                )
+            )
+
+
+def _find_by_dashboard_and_name(
+    remote: RemoteIndex, dashboard_id: int | None, name: str
+) -> dict[str, Any] | None:
+    for p in remote.pulses_by_id.values():
+        if p.get("dashboard_id") == dashboard_id and p.get("name") == name:
+            return p
+    return None
+
+
+def _build_pulse_payload(
+    doc: dict[str, Any],
+    pulse_path: Path,
+    collection_id: int | None,
+    dashboard_id: int | None,
+    card_id_by_disk_path: dict[Path, int],
+    remote: RemoteIndex,
+) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+    """Build the pulse PUT payload + return (pulse_name, email) pairs whose
+    user wasn't found on the target. Caller decides what to do: warn during
+    plan, raise during apply."""
+    cards: list[dict[str, Any]] = []
+    for c in doc.get("cards", []) or []:
+        cid = resolve_card_path(
+            c.get("card_path"), pulse_path.parent, card_id_by_disk_path
+        )
+        cards.append(
+            {
+                "id": cid,
+                "display": c.get("display"),
+                "include_csv": c.get("include_csv", False),
+                "include_xls": c.get("include_xls", False),
+                "format_rows": c.get("format_rows", True),
+                "pivot_results": c.get("pivot_results", False),
+                "parameter_mappings": c.get("parameter_mappings"),
+            }
+        )
+    missing: list[tuple[str, str]] = []
+    channels = []
+    for ch in doc.get("channels", []) or []:
+        ch_recipients: list[dict[str, Any]] = []
+        for r in ch.get("recipients", []) or []:
+            email = r.get("email")
+            if not email:
+                continue
+            user = remote.users_by_email.get(email)
+            if user is None:
+                missing.append((doc["name"], email))
+                continue
+            ch_recipients.append({"id": user["id"]})
+        channels.append(
+            {
+                "channel_type": ch["channel_type"],
+                "schedule_type": ch["schedule_type"],
+                "schedule_hour": ch.get("schedule_hour"),
+                "schedule_day": ch.get("schedule_day"),
+                "schedule_frame": ch.get("schedule_frame"),
+                "enabled": ch.get("enabled", True),
+                "channel_id": ch.get("channel_id"),
+                "recipients": ch_recipients,
+            }
+        )
+    payload = {
+        "name": doc["name"],
+        "collection_id": collection_id,
+        "dashboard_id": dashboard_id,
+        "skip_if_empty": doc.get("skip_if_empty", False),
+        "parameters": doc.get("parameters", []),
+        "cards": cards,
+        "channels": channels,
+    }
+    return payload, missing

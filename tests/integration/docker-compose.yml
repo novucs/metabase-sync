@@ -1,0 +1,38 @@
+services:
+  metabase:
+    # Pinned tag — bump deliberately when validating against a newer version.
+    # The CI workflow runs a separate non-blocking job against `latest` to
+    # surface upcoming breakage without failing PRs.
+    image: metabase/metabase:${METABASE_VERSION:-v0.62.2}
+    ports:
+      - "3000:3000"
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_HOST: postgres
+      MB_DB_PORT: 5432
+      MB_DB_DBNAME: metabase
+      MB_DB_USER: metabase
+      MB_DB_PASS: metabase
+      MB_JETTY_HOST: 0.0.0.0
+      MB_JETTY_PORT: 3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/health > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: metabase
+      POSTGRES_PASSWORD: metabase
+      POSTGRES_DB: metabase
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U metabase -d metabase"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
