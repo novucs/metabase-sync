@@ -1,7 +1,17 @@
-"""Apply snippets — POST new, PUT changed, bind to owning collection via
-on-disk path."""
+"""Apply snippets — POST new, PUT changed.
+
+Snippet folders are NOT yet supported: Metabase keeps snippet collections in a
+separate `:snippets` namespace, distinct from the card/dashboard collection
+tree this tool models. Sending a normal collection id to the snippet endpoint is
+rejected with a 400, which would abort the whole apply. So a snippet authored
+under `collections/<x>/snippets/` is applied to the root snippets namespace
+(collection_id=None) with a one-time warning, rather than crashing. Tracked as a
+follow-up (proper `:snippets`-namespace support).
+"""
 
 from __future__ import annotations
+
+import logging
 
 from metabase_sync.plan import Change
 from metabase_sync.serialize.snippets import (
@@ -11,6 +21,8 @@ from metabase_sync.serialize.snippets import (
 from metabase_sync.serialize.yamlio import write_frontmatter_sql
 
 from ._shared import ApplyContext, diff_fields, find_by_name, summarize_diffs
+
+log = logging.getLogger(__name__)
 
 
 def apply_snippets(ctx: ApplyContext) -> None:
@@ -23,12 +35,16 @@ def apply_snippets(ctx: ApplyContext) -> None:
             else find_by_name(ctx.remote.snippets_by_id, fm["name"])
         )
 
-        collection_dir = resolve_snippet_collection_dir(ctx.state_dir, path)
-        collection_id: int | None = (
-            ctx.collection_id_by_disk_path.get(collection_dir.resolve())
-            if collection_dir is not None
-            else None
-        )
+        if resolve_snippet_collection_dir(ctx.state_dir, path) is not None:
+            log.warning(
+                "snippet %s is under a collection folder, but snippet folders "
+                "are not yet supported (Metabase keeps them in a separate "
+                "namespace). Applying it to the root snippets namespace.",
+                relpath,
+            )
+        # Snippets can only live in the :snippets namespace, never a normal
+        # collection — always None until namespace support lands.
+        collection_id: int | None = None
 
         desired = {
             "name": fm["name"],

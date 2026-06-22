@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-06-22
+
+### Fixed
+
+- **Card SQL edits now apply on Metabase ≥ v0.62.** Cards created/updated via the
+  API on newer Metabase return `legacy_query: null`, with the query only in
+  `dataset_query` (MBQL5). The diff previously skipped the query comparison when
+  `legacy_query` was null, so SQL edits to such cards were silently never
+  applied. The diff now falls back to `dataset_query` and compares native SQL
+  across both the classic and MBQL5 forms.
+- **Snippets in collection folders no longer abort apply.** Metabase keeps
+  snippet collections in a separate `:snippets` namespace; sending a normal
+  collection id to the snippet endpoint returns a 400 that aborted the whole
+  run. Snippets authored under a collection folder now apply to the root
+  snippets namespace with a warning instead of crashing. (Proper snippet-folder
+  support remains a follow-up.)
+
+### Testing
+
+- Rebuilt the integration suite around shared builders (`_builders.py`) and a
+  thin admin client (`_mb.py`), split by resource (export/cards/dashboards/
+  snippets/pulses/apply-semantics/cli). 33 integration tests, green against both
+  Metabase v0.55.16 and v0.62.2.
+- New real-server coverage for the previously mock-only paths: apply
+  idempotency + entity_id write-back, native SQL updates, pulses, GUI/MBQL
+  cards, optimistic-concurrency drift, both preflights, the schema-version gate,
+  dashboard parameters, nested collections, and the full CLI surface.
+
 ## [0.1.0] — 2026-06-20
 
 ### Commands

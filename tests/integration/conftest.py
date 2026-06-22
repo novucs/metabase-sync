@@ -6,6 +6,22 @@ Tear-down: `docker compose down -v` so each test session starts from scratch.
 Costs ~60-90s of Metabase boot per session. Mark every test with
 `@pytest.mark.integration` so the fast unit suite (`pytest --ignore=tests/integration`)
 doesn't pay this.
+
+## Shared-mutable-server contract
+
+There is ONE Metabase per pytest session and NO per-test reset (a full reset
+would multiply the boot cost across the suite). Consequences every test must
+respect:
+
+* Author your objects in a UNIQUELY-named collection — use `_unique_name(prefix)`
+  so two tests (or two runs against a warm instance) never collide.
+* Scope assertions to your own objects, not global counts. The one safe
+  exception is whole-server no-op checks (export the whole tree, then plan/apply
+  and assert zero writes) — those are inherently consistent because disk always
+  reflects the server state they were exported from.
+* Don't assume the instance is empty. `test_export_against_empty` only holds if
+  it runs first; treat it as "export a fresh-ish instance" rather than a
+  guarantee.
 """
 
 from __future__ import annotations
@@ -18,6 +34,8 @@ from pathlib import Path
 
 import httpx
 import pytest
+
+from ._mb import MetabaseAdmin
 
 COMPOSE_FILE = Path(__file__).parent / "docker-compose.yml"
 METABASE_URL = "http://localhost:3000"
@@ -110,3 +128,13 @@ def metabase_url(metabase_url_and_key: tuple[str, str]) -> str:
 @pytest.fixture(scope="session")
 def metabase_api_key(metabase_url_and_key: tuple[str, str]) -> str:
     return metabase_url_and_key[1]
+
+
+@pytest.fixture
+def mb(metabase_url_and_key: tuple[str, str]) -> Iterator[MetabaseAdmin]:
+    """Per-test admin client for server-side setup (create cards, dashboards…)."""
+    admin = MetabaseAdmin(*metabase_url_and_key)
+    try:
+        yield admin
+    finally:
+        admin.close()

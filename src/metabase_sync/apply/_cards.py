@@ -23,7 +23,6 @@ from metabase_sync.serialize.yamlio import write_frontmatter_sql, write_yaml
 
 from ._shared import (
     ApplyContext,
-    normalize,
     normalize_dataset_query,
     summarize_diffs,
 )
@@ -196,49 +195,96 @@ def _diff_card(
     for k in ("name", "description", "display", "collection_id", "archived"):
         if desired.get(k) != remote.get(k):
             diffs.append((k, remote.get(k), desired.get(k)))
-    remote_legacy = remote.get("legacy_query")
-    if remote_legacy:
-        try:
-            remote_dq = json.loads(remote_legacy)
-        except json.JSONDecodeError:
-            diffs.append(("dataset_query", "<unparseable>", "<rebuilt>"))
-            return diffs
-        if normalize_dataset_query(desired["dataset_query"]) != normalize_dataset_query(
-            remote_dq
-        ):
-            diffs.extend(_dataset_query_diffs(remote_dq, desired["dataset_query"]))
+
+    remote_dq = _remote_dataset_query(remote)
+    if remote_dq is None:
+        return diffs
+    if remote_dq.get("__unparseable__"):
+        diffs.append(("dataset_query", "<unparseable>", "<rebuilt>"))
+        return diffs
+    diffs.extend(_dataset_query_diffs(remote_dq, desired["dataset_query"]))
     return diffs
+
+
+def _remote_dataset_query(remote: dict[str, Any]) -> dict[str, Any] | None:
+    """The remote card's query in whatever form Metabase returns.
+
+    Prefer the stable classic `legacy_query` JSON string when present (older
+    Metabase). On newer versions (≳v0.62) `legacy_query` is null for
+    API-created/updated cards and the query only lives in `dataset_query`
+    (MBQL5) — so fall back to that, otherwise the diff goes blind and SQL edits
+    silently never apply.
+    """
+    legacy = remote.get("legacy_query")
+    if legacy:
+        try:
+            return json.loads(legacy)
+        except json.JSONDecodeError:
+            return {"__unparseable__": True}
+    dq = remote.get("dataset_query")
+    return dq if isinstance(dq, dict) else None
 
 
 def _dataset_query_diffs(
     remote_dq: dict[str, Any], desired_dq: dict[str, Any]
 ) -> list[tuple[str, Any, Any]]:
-    """Break a dataset_query change into specific sub-diffs so the plan report
-    is useful (e.g. 'SQL: 76 → 78 lines, +2 −0' rather than '<old> → <new>')."""
-    diffs: list[tuple[str, Any, Any]] = []
-    if remote_dq.get("type") != desired_dq.get("type"):
-        diffs.append(("query_type", remote_dq.get("type"), desired_dq.get("type")))
-        return diffs
+    """Compare desired vs remote query, robust to the classic-vs-MBQL5 form
+    split. Native SQL is compared by extracting the SQL string from either
+    form; GUI/structured queries are compared structurally after stripping the
+    volatile `lib/uuid` keys.
+    """
+    desired_sql = _native_sql(desired_dq)
+    remote_sql = _native_sql(remote_dq)
 
-    if desired_dq.get("type") == "native":
-        remote_native = remote_dq.get("native") or {}
-        desired_native = desired_dq.get("native") or {}
-        remote_sql = remote_native.get("query") or ""
-        desired_sql = desired_native.get("query") or ""
-        if remote_sql != desired_sql:
-            diffs.append(("SQL", _sql_change_summary(remote_sql, desired_sql), None))
-        if (remote_native.get("template-tags") or {}) != (
-            desired_native.get("template-tags") or {}
-        ):
-            r = list((remote_native.get("template-tags") or {}).keys())
-            d = list((desired_native.get("template-tags") or {}).keys())
-            diffs.append(("template_tags", r, d))
-    else:
-        remote_q = remote_dq.get("query") or {}
-        desired_q = desired_dq.get("query") or {}
-        if normalize(remote_q) != normalize(desired_q):
-            diffs.append(("MBQL query structure", "(changed)", None))
-    return diffs
+    if desired_sql is not None or remote_sql is not None:
+        # At least one side is a native (SQL) query.
+        if (desired_sql is None) != (remote_sql is None):
+            return [
+                (
+                    "query_type",
+                    "native" if remote_sql is not None else "query",
+                    "native" if desired_sql is not None else "query",
+                )
+            ]
+        if desired_sql != remote_sql:
+            return [
+                ("SQL", _sql_change_summary(remote_sql or "", desired_sql or ""), None)
+            ]
+        # SQL identical. Compare template tags only when both sides expose them
+        # in classic form (MBQL5 reshapes tags; comparing across forms would
+        # produce spurious diffs and break idempotency).
+        d_tags = _classic_native_tags(desired_dq)
+        r_tags = _classic_native_tags(remote_dq)
+        if d_tags is not None and r_tags is not None and d_tags != r_tags:
+            return [("template_tags", sorted(r_tags), sorted(d_tags))]
+        return []
+
+    # Both GUI/structured. Same-form compare after stripping volatile keys.
+    if normalize_dataset_query(remote_dq) != normalize_dataset_query(desired_dq):
+        return [("MBQL query structure", "(changed)", None)]
+    return []
+
+
+def _native_sql(dq: dict[str, Any]) -> str | None:
+    """Extract the SQL string from a native query in classic or MBQL5 form.
+    Returns None if the query isn't native."""
+    if dq.get("type") == "native":
+        return (dq.get("native") or {}).get("query") or ""
+    stages = dq.get("stages")
+    if isinstance(stages, list) and stages:
+        stage = stages[0]
+        if isinstance(stage, dict) and stage.get("lib/type") == "mbql.stage/native":
+            sql = stage.get("native")
+            return sql if isinstance(sql, str) else ""
+    return None
+
+
+def _classic_native_tags(dq: dict[str, Any]) -> set[str] | None:
+    """Template-tag names for a classic-form native query, else None (we don't
+    reliably parse MBQL5-form tags)."""
+    if dq.get("type") == "native":
+        return set((dq.get("native") or {}).get("template-tags") or {})
+    return None
 
 
 def _sql_change_summary(before: str, after: str) -> str:
