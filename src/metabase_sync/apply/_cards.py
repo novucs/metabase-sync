@@ -83,6 +83,7 @@ def apply_cards(ctx: ApplyContext) -> None:
             )
             if ctx.mode == "apply":
                 created = ctx.client.post("/api/card", desired)
+                _assert_query_persisted(relpath, desired["dataset_query"], created)
                 ctx.card_id_by_disk_path[path.resolve()] = int(created["id"])
                 fm["entity_id"] = created.get("entity_id")
                 _rewrite_card_file(path, fm, body, gui_query)
@@ -116,7 +117,8 @@ def apply_cards(ctx: ApplyContext) -> None:
                 )
             )
             if ctx.mode == "apply":
-                ctx.client.put(f"/api/card/{remote_card['id']}", desired)
+                updated = ctx.client.put(f"/api/card/{remote_card['id']}", desired)
+                _assert_query_persisted(relpath, desired["dataset_query"], updated)
         else:
             ctx.plan.add(
                 Change(
@@ -168,12 +170,79 @@ def _build_dataset_query(
             "type": "native",
             "native": {
                 "query": body,
-                "template-tags": fm.get("template_tags") or {},
+                "template-tags": _normalize_template_tags(
+                    fm.get("template_tags") or {}
+                ),
             },
         }
     dq = dict(gui_query or {})
     dq["database"] = db_id
     return dq
+
+
+def _normalize_template_tags(tags: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite `dimension` (field-filter) template-tag references to classic
+    MBQL form before wrapping the tags in a classic `type: native` query.
+
+    Metabase ≥ v0.61 returns native template-tag dimensions as MBQL5 field
+    clauses (`["field", {opts…}, <id>]`, options map first). Sent back inside a
+    classic `type: native` query they fail server-side normalisation; the
+    classic form `["field", <id>, <opts|null>]` round-trips on both forms.
+    """
+    out: dict[str, Any] = {}
+    for name, tag in tags.items():
+        if isinstance(tag, dict) and tag.get("type") == "dimension":
+            tag = {**tag, "dimension": _classic_field_ref(tag.get("dimension"))}
+        out[name] = tag
+    return out
+
+
+def _classic_field_ref(ref: Any) -> Any:
+    """`["field", {opts}, id]` (MBQL5) → `["field", id, opts|null]` (classic).
+
+    Already-classic refs (id in position 1) and any non-`:field` clause are
+    returned untouched. `lib/*` bookkeeping and the MBQL5-only `effective-type`
+    are dropped from the options; an empty options map becomes `null`.
+    """
+    if not (isinstance(ref, list) and len(ref) == 3 and ref[0] == "field"):
+        return ref
+    opts, ident = ref[1], ref[2]
+    if not isinstance(opts, dict):
+        return ref  # already classic: ["field", <id>, <opts|null>]
+    cleaned = {
+        k: v
+        for k, v in opts.items()
+        if not k.startswith("lib/") and k != "effective-type"
+    }
+    return ["field", ident, cleaned or None]
+
+
+def _has_query(dq: dict[str, Any] | None) -> bool:
+    """Whether a dataset_query actually carries a query (vs the empty `{}` some
+    Metabase versions store after a failed normalisation)."""
+    if not dq:
+        return False
+    if (dq.get("native") or {}).get("query"):
+        return True
+    if isinstance(dq.get("stages"), list) and dq["stages"]:
+        return True
+    return bool(dq.get("query"))
+
+
+def _assert_query_persisted(
+    relpath: str, sent: dict[str, Any], returned: dict[str, Any]
+) -> None:
+    """Fail loudly if we sent a non-empty query but the server stored an empty
+    one. Some versions answer such a write with HTTP 2xx, so without this check
+    the apply would report success while having wiped the card."""
+    if not _has_query(sent):
+        return
+    if not _has_query(returned.get("dataset_query")):
+        raise RuntimeError(
+            f"{relpath}: Metabase accepted the write (HTTP 2xx) but stored an "
+            f"empty dataset_query — the card was not updated correctly. Aborting "
+            f"before further cards are touched."
+        )
 
 
 def _rewrite_card_file(
@@ -209,20 +278,25 @@ def _diff_card(
 def _remote_dataset_query(remote: dict[str, Any]) -> dict[str, Any] | None:
     """The remote card's query in whatever form Metabase returns.
 
-    Prefer the stable classic `legacy_query` JSON string when present (older
-    Metabase). On newer versions (≳v0.62) `legacy_query` is null for
-    API-created/updated cards and the query only lives in `dataset_query`
-    (MBQL5) — so fall back to that, otherwise the diff goes blind and SQL edits
-    silently never apply.
+    For native cards the live `dataset_query` is authoritative and is preferred
+    whenever it carries SQL: some versions also expose a `legacy_query`
+    projection that can lag behind it (stale SQL), which would otherwise read as
+    a perpetual false-positive diff and re-PUT the card on every apply.
+
+    For structured/GUI cards `dataset_query` carries no native SQL, so fall back
+    to the classic `legacy_query` JSON when present, else `dataset_query`.
     """
+    dq = remote.get("dataset_query")
+    dq = dq if isinstance(dq, dict) else None
+    if dq is not None and _native_sql(dq) is not None:
+        return dq
     legacy = remote.get("legacy_query")
     if legacy:
         try:
             return json.loads(legacy)
         except json.JSONDecodeError:
             return {"__unparseable__": True}
-    dq = remote.get("dataset_query")
-    return dq if isinstance(dq, dict) else None
+    return dq
 
 
 def _dataset_query_diffs(

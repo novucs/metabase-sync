@@ -57,6 +57,17 @@ class MetabaseAdmin:
         tables = self.get("/api/table")
         return int(next(t for t in tables if t.get("db_id") == db_id)["id"])
 
+    def datetime_field(self) -> tuple[int, str]:
+        """(field_id, table_name) of a DateTime field on the sample DB, for
+        authoring field-filter (`dimension`) template tags."""
+        db_id = self.sample_db_id()
+        meta = self.get(f"/api/database/{db_id}/metadata")
+        for table in meta["tables"]:
+            for fld in table["fields"]:
+                if fld.get("base_type") == "type/DateTime":
+                    return int(fld["id"]), str(table["name"])
+        raise RuntimeError("no DateTime field on the sample database")
+
     # --- collections --------------------------------------------------------
 
     def create_collection(

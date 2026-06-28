@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-06-28
+
+### Fixed
+
+- **Field-filter (`dimension`) native cards no longer lose their query on
+  apply.** Metabase ≥ v0.61 returns a `dimension` template tag's field reference
+  in MBQL5 form (`["field", {…}, <id>]`). Re-sending that inside a classic
+  native query fails server-side normalisation: v0.62 rejects the write, while
+  v0.61 accepts it (HTTP 200) and stores an empty query. Apply now converts
+  dimension field references to classic form (`["field", <id>, <opts|null>]`)
+  before sending.
+- **Apply aborts instead of silently succeeding when a write empties a card.**
+  Some Metabase versions answer a query-normalisation failure with HTTP 2xx and
+  an empty `dataset_query`. Apply now verifies the stored query is non-empty and
+  raises rather than reporting a successful but destructive write.
+- **Native cards no longer re-PUT on every apply.** The diff preferred the
+  server's `legacy_query`, which can lag behind the live `dataset_query` on some
+  versions, so native cards whose live query already matched disk produced a
+  perpetual false-positive diff. The diff now prefers the live `dataset_query`
+  for native cards.
+
+### Testing
+
+- Unit coverage for dimension-tag normalisation, the live-vs-stale query diff,
+  and the empty-query guard (`test_template_tags.py`, `test_card_diff.py`), plus
+  an integration regression that a field-filter native card keeps its query
+  through a disk-driven SQL update. Verified against Metabase v0.61.3.
+
 ## [0.1.1] — 2026-06-22
 
 ### Fixed

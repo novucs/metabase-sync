@@ -56,11 +56,13 @@ def test_no_diff_when_sql_matches_across_forms():
     assert _diff_card(_desired("SELECT 1"), _remote_mbql5("SELECT 1")) == []
 
 
-def test_legacy_query_still_preferred_when_present():
-    desired = _desired("SELECT 2")
-    remote = _remote_mbql5("SELECT 1")
+def test_live_dataset_query_wins_over_stale_legacy_query():
+    # A native card whose live dataset_query already matches disk, but whose
+    # legacy_query projection is stale, must be a no-op — the diff trusts the
+    # live query, not the lagging legacy_query (else it re-PUTs every apply).
+    desired = _desired("SELECT 1")
+    remote = _remote_mbql5("SELECT 1")  # live query matches desired
     remote["legacy_query"] = (
-        '{"database":1,"type":"native","native":{"query":"SELECT 1","template-tags":{}}}'
+        '{"database":1,"type":"native","native":{"query":"SELECT stale","template-tags":{}}}'
     )
-    diffs = _diff_card(desired, remote)
-    assert any(field == "SQL" for field, _b, _a in diffs)
+    assert _diff_card(desired, remote) == []

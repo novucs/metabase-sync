@@ -109,6 +109,54 @@ def test_parameterized_native_card(
     assert all(c.action == "skip" for c in plan.changes if c.name == name)
 
 
+def test_native_dimension_field_filter_survives_update(
+    mb: MetabaseAdmin, metabase_url: str, metabase_api_key: str, tmp_path: Path
+) -> None:
+    """A native card with a `dimension` (field-filter) template tag must keep
+    its query through a disk-driven SQL update. Metabase returns the tag's field
+    ref in MBQL5 form; re-applying it inside a classic native query must not
+    empty the stored query (see _normalize_template_tags + the apply guard)."""
+    field_id, table = mb.datetime_field()
+    coll = mb.create_collection(unique_name("ff-coll"))
+    name = unique_name("ff-card")
+    tags = {
+        "date_range": {
+            "id": "e51b8a62-bf5c-47c1-b912-8088ce20a129",
+            "name": "date_range",
+            "display-name": "Date Range",
+            "type": "dimension",
+            "widget-type": "date/all-options",
+            "dimension": ["field", field_id, None],
+        }
+    }
+    mb.create_native_card(
+        name,
+        f"SELECT count(*) AS n FROM {table} WHERE {{{{date_range}}}}",
+        collection_id=coll["id"],
+        template_tags=tags,
+    )
+
+    # Export captures the server's MBQL5-form dimension onto disk.
+    state = tmp_path / "state"
+    with MetabaseClient(metabase_url, metabase_api_key) as client:
+        run_export(client, state)
+    card_file = next(p for p in state.rglob("cards/*.sql") if name in p.read_text())
+
+    # Force an update by editing the SQL, then apply.
+    card_file.write_text(
+        card_file.read_text().replace("count(*) AS n", "count(*) AS total")
+    )
+    _apply(metabase_url, metabase_api_key, state, mode="apply")
+
+    detail = mb.find_card(name)
+    assert detail.get("dataset_query"), "field-filter card was emptied by apply"
+    assert "count(*) AS total" in json.dumps(detail)
+
+    # Idempotent: a follow-up plan is a no-op for this card.
+    plan = _apply(metabase_url, metabase_api_key, state, mode="plan")
+    assert all(c.action == "skip" for c in plan.changes if c.name == name)
+
+
 def test_model_result_metadata_preserved(
     mb: MetabaseAdmin, metabase_url: str, metabase_api_key: str, tmp_path: Path
 ) -> None:
