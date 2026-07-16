@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-07-16
+
+### Fixed
+
+- **Export no longer writes stale SQL over native cards, silently undoing an
+  apply.** Metabase's `legacy_query` projection can lag behind the live
+  `dataset_query` after an API write, still returning the pre-write SQL. Export
+  read `legacy_query` first, so a card that had been updated correctly was
+  re-serialised to disk with its *old* SQL: the applied change looked like it had
+  never landed, and applying that export would have pushed the old SQL back to
+  the server for real. Export now prefers the live `dataset_query` whenever it
+  carries SQL, matching the precedence the diff path adopted in 0.1.2, and falls
+  back to `legacy_query` only for versions that leave `dataset_query` empty.
+
+### Testing
+
+- Unit coverage that export prefers the live query over a stale `legacy_query`
+  (`test_legacy_query.py`), plus an integration regression that applies a SQL
+  edit and exports it back to disk (`test_cards.py`). The existing
+  server-side assertion could not catch this class of bug: only a round trip
+  back to disk can.
+
 ## [0.1.2] — 2026-06-28
 
 ### Fixed

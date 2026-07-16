@@ -125,6 +125,35 @@ def test_native_card_from_mbql5_stage_round_trip(tmp_path: Path):
     assert fm["database"] == "sample"
 
 
+def test_export_prefers_live_dataset_query_over_stale_legacy_query(tmp_path: Path):
+    """The `legacy_query` projection can lag behind the live `dataset_query`
+    after an API write: Metabase answers a PUT by updating dataset_query while
+    legacy_query still holds the pre-write SQL. The diff path already trusts the
+    live query (test_card_diff.test_live_dataset_query_wins_over_stale_legacy_query);
+    export must use the same precedence, or it writes the stale SQL back to disk
+    and a correctly-applied change reads as though it never landed.
+    """
+    card = _make_native_card(
+        legacy_query=json.dumps(
+            {
+                "database": 2,
+                "type": "native",
+                "native": {"query": "SELECT stale", "template-tags": {}},
+            }
+        ),
+        dataset_query={
+            "database": 2,
+            "type": "native",
+            "native": {"query": "SELECT fresh", "template-tags": {}},
+        },
+    )
+    path = tmp_path / "card.sql"
+    write_card(path, card, db_name_by_id={2: "bigquery"})
+
+    _fm, body, _gui = read_card_file(path)
+    assert body == "SELECT fresh"
+
+
 def test_native_card_round_trip(tmp_path: Path):
     card = _make_native_card()
     path = tmp_path / "card.sql"

@@ -2,8 +2,10 @@
 
 Storage decisions:
 
-* Native cards: the SQL body is the literal `legacy_query.native.query` string —
-  byte-faithful so trailing whitespace round-trips.
+* Native cards: the SQL body is the literal query string, byte-faithful so
+  trailing whitespace round-trips. It is read from the live `dataset_query`
+  when that carries SQL, falling back to `legacy_query` (see
+  `_native_components` for why the precedence matters).
 * GUI cards: store the full `dataset_query` dict. Metabase exposes two shapes:
   - On older versions (≲v0.61), `legacy_query` is the stable "classic"
     `{database, type:'query', query:{...}}` form.
@@ -134,19 +136,32 @@ def _native_components(card: Card) -> tuple[str, dict[str, Any]] | None:
     * MBQL5 form in `dataset_query.stages`: a `mbql.stage/native` stage with
       the SQL string inline. Seen on Metabase ≥ v0.62 for cards created via
       the UI.
-    """
-    legacy = _legacy_dict(card)
-    if legacy.get("type") == "native":
-        native = legacy.get("native") or {}
-        return native.get("query") or "", native.get("template-tags") or {}
 
-    dq = card.dataset_query or {}
-    if dq.get("type") == "native":
-        native = dq.get("native") or {}
+    The live `dataset_query` wins whenever it carries SQL: after an API write
+    Metabase updates it while the `legacy_query` projection can still return the
+    pre-write SQL. Exporting that stale copy makes an applied change look like it
+    never landed, and re-applying the export would revert the card for real. The
+    diff path picks the live query for the same reason (see
+    `apply._cards._remote_dataset_query`). `legacy_query` stays the fallback for
+    versions that leave `dataset_query` empty.
+    """
+    live = _native_query(card.dataset_query or {})
+    legacy = _native_query(_legacy_dict(card))
+    if live is not None and live[0]:
+        return live
+    if legacy is not None and legacy[0]:
+        return legacy
+    return live or legacy
+
+
+def _native_query(query: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    """(sql_body, template_tags) for a native query in classic or MBQL5 form."""
+    if query.get("type") == "native":
+        native = query.get("native")
         if isinstance(native, dict):
             return native.get("query") or "", native.get("template-tags") or {}
 
-    stages = dq.get("stages")
+    stages = query.get("stages")
     if isinstance(stages, list) and stages:
         stage = stages[0]
         if isinstance(stage, dict) and stage.get("lib/type") == "mbql.stage/native":

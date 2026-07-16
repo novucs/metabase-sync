@@ -1,5 +1,6 @@
-"""Card integration tests: native update, GUI/MBQL create+update, parameterized
-native, model metadata preservation, move between collections."""
+"""Card integration tests: native update, apply→export round trip, GUI/MBQL
+create+update, parameterized native, model metadata preservation, move between
+collections."""
 
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import pytest
 from metabase_sync.apply import run as run_apply
 from metabase_sync.client import MetabaseClient
 from metabase_sync.export import run_export
+from metabase_sync.serialize.cards import read_card_file
 
 from ._builders import unique_name, write_collection, write_gui_card, write_native_card
 from ._mb import MetabaseAdmin
@@ -21,6 +23,14 @@ pytestmark = pytest.mark.integration
 def _apply(url: str, key: str, state: Path, **kw):
     with MetabaseClient(url, key) as client:
         return run_apply(client, state, **kw)
+
+
+def _exported_card_body(state: Path, name: str) -> str | None:
+    for path in (state / "collections").rglob("cards/*.sql"):
+        fm, body, _gui = read_card_file(path)
+        if fm.get("name") == name:
+            return body
+    return None
 
 
 def test_native_card_sql_update_lands(
@@ -48,6 +58,40 @@ def test_native_card_sql_update_lands(
 
     plan = _apply(metabase_url, metabase_api_key, state, mode="plan")
     assert all(c.action == "skip" for c in plan.changes if c.name == name)
+
+
+def test_applied_sql_survives_export(
+    mb: MetabaseAdmin, metabase_url: str, metabase_api_key: str, tmp_path: Path
+) -> None:
+    """Apply a SQL edit, then export: disk must carry the applied SQL.
+
+    Right after an API write, Metabase's `legacy_query` projection can still
+    return the pre-write SQL. Export used to trust it and wrote that stale copy
+    back over the file, so a change that had genuinely landed read as though it
+    never applied — and re-applying the export would have reverted the card for
+    real. Checking the server (as test_native_card_sql_update_lands does) can't
+    catch this; only a round trip back to disk can.
+    """
+    db = mb.sample_db_name()
+    name = unique_name("export-fresh")
+    state = tmp_path / "state"
+    write_collection(state, "c", "C")
+    card_file = write_native_card(state, "c", "card", name, "SELECT 1 AS a", db)
+
+    _apply(metabase_url, metabase_api_key, state, mode="apply")
+    card_file.write_text(
+        card_file.read_text().replace("SELECT 1 AS a", "SELECT 2 AS b")
+    )
+    _apply(metabase_url, metabase_api_key, state, mode="apply")
+
+    exported = tmp_path / "exported"
+    with MetabaseClient(metabase_url, metabase_api_key) as client:
+        run_export(client, exported)
+
+    body = _exported_card_body(exported, name)
+    assert body is not None, f"card {name!r} missing from export"
+    assert "SELECT 2 AS b" in body
+    assert "SELECT 1 AS a" not in body
 
 
 def test_gui_card_create_and_update(
