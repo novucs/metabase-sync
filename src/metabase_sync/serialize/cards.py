@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from metabase_sync.models import Card
-from metabase_sync.serialize.canon import CARD, canonical
+from metabase_sync.serialize.canon import CARD, canonical, strip_query_volatile
 from metabase_sync.serialize.paths import disambiguate, slugify
 from metabase_sync.serialize.yamlio import (
     load_yaml,
@@ -80,7 +80,7 @@ def write_card(path: Path, card: Card, db_name_by_id: dict[int, str]) -> None:
     if native is not None:
         body, template_tags = native
         frontmatter = _common_frontmatter(card, db_name) | {
-            "template_tags": template_tags,
+            "template_tags": strip_query_volatile(template_tags),
             **extra,
         }
         write_frontmatter_sql(path, canonical(frontmatter, CARD), body)
@@ -91,7 +91,7 @@ def write_card(path: Path, card: Card, db_name_by_id: dict[int, str]) -> None:
         legacy = _legacy_dict(card)
         dataset_query = legacy if legacy else dict(card.dataset_query)
         doc = _common_frontmatter(card, db_name) | {
-            "dataset_query": dataset_query,
+            "dataset_query": strip_query_volatile(dataset_query),
             **extra,
         }
         write_yaml(path, canonical(doc, CARD))

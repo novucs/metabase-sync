@@ -97,6 +97,24 @@ DASHBOARD_CHILDREN = {"tabs": TAB, "dashcards": DASHCARD}
 PULSE_CHILDREN = {"cards": PULSE_CARD, "channels": CHANNEL}
 
 
+# Server-regenerated bookkeeping inside query structures (dataset_query,
+# template_tags). Never persisted and never diffed; scoped to queries because
+# these words can be legitimate keys in user content elsewhere.
+QUERY_VOLATILE_KEYS = frozenset({"info", "lib/uuid", "lib.convert/converted?"})
+
+
+def strip_query_volatile(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            k: strip_query_volatile(v)
+            for k, v in value.items()
+            if k not in QUERY_VOLATILE_KEYS
+        }
+    if isinstance(value, list):
+        return [strip_query_volatile(item) for item in value]
+    return value
+
+
 def canonical(
     doc: dict[str, Any],
     template: tuple[str, ...],

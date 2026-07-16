@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-07-16
+
+### Fixed
+
+- **Export no longer persists `lib/uuid` (and sibling server bookkeeping)
+  inside queries.** Metabase regenerates these MBQL5 values server-side, so
+  storing them made re-exports rewrite otherwise-unchanged cards forever. The
+  diff already ignored them; writes (export and apply write-backs) now strip
+  them from `dataset_query` and `template_tags` too. The first export after
+  upgrading removes them from existing state once.
+
+### Testing
+
+- Unit coverage that written card files carry no `lib/uuid` in either form
+  (`test_legacy_query.py`); both integration suites (pinned v0.62.2 and
+  v0.55.16) verified.
+
 ## [0.2.1] — 2026-07-16
 
 ### Fixed

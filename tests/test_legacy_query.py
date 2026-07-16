@@ -208,6 +208,59 @@ def test_gui_card_round_trip_mbql5_form(tmp_path: Path):
     }
 
 
+def test_export_strips_volatile_lib_uuid(tmp_path: Path):
+    """Metabase regenerates lib/uuid on every save; persisting them makes
+    every export rewrite otherwise-unchanged cards. Written files must carry
+    none, in the GUI dataset_query or in native template_tags dimensions."""
+    legacy = json.dumps(
+        {
+            "lib/type": "mbql/query",
+            "database": 2,
+            "stages": [
+                {
+                    "lib/type": "mbql.stage/mbql",
+                    "lib/uuid": "aaaa-1111",
+                    "source-table": 2,
+                }
+            ],
+        }
+    )
+    gui_card = _make_native_card(name="GUI", legacy_query=legacy, display="bar")
+    gui_path = tmp_path / "card.yaml"
+    write_card(gui_path, gui_card, db_name_by_id={2: "bigquery"})
+    _fm, _body, gui = read_card_file(gui_path)
+    assert "lib/uuid" not in gui_path.read_text()
+    assert gui["stages"][0]["lib/type"] == "mbql.stage/mbql"
+
+    native_legacy = json.dumps(
+        {
+            "type": "native",
+            "database": 2,
+            "native": {
+                "query": "SELECT {{d}}",
+                "template-tags": {
+                    "d": {
+                        "type": "dimension",
+                        "name": "d",
+                        "dimension": [
+                            "field",
+                            {"lib/uuid": "bbbb-2222", "base-type": "type/Date"},
+                            8589,
+                        ],
+                    }
+                },
+            },
+        }
+    )
+    native_card = _make_native_card(legacy_query=native_legacy)
+    native_path = tmp_path / "card.sql"
+    write_card(native_path, native_card, db_name_by_id={2: "bigquery"})
+    assert "lib/uuid" not in native_path.read_text()
+    fm, body, _gui = read_card_file(native_path)
+    assert body == "SELECT {{d}}"
+    assert fm["template_tags"]["d"]["dimension"][2] == 8589
+
+
 def test_gui_card_backwards_compat_old_on_disk_format(tmp_path: Path):
     """Files written by an earlier pre-release of the tool stored only the
     classic `query` sub-dict at top level. read_card_file lifts them into the

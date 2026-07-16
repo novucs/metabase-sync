@@ -15,6 +15,7 @@ from typing import Any, Literal
 from metabase_sync.client import MetabaseClient
 from metabase_sync.diff import RemoteIndex
 from metabase_sync.plan import Plan, diff_summary
+from metabase_sync.serialize.canon import QUERY_VOLATILE_KEYS
 
 Mode = Literal["plan", "apply"]
 
@@ -86,7 +87,7 @@ def resolve_card_path(
 # --- dataset_query normalisation (used by cards diff) ---------------------------
 
 
-_VOLATILE_KEYS = frozenset({"info", "lib/uuid", "lib.convert/converted?"})
+_VOLATILE_KEYS = QUERY_VOLATILE_KEYS
 
 
 def normalize_dataset_query(dq: dict[str, Any]) -> dict[str, Any]:

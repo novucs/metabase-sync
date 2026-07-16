@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from metabase_sync.plan import Change
-from metabase_sync.serialize.canon import CARD, canonical
+from metabase_sync.serialize.canon import CARD, canonical, strip_query_volatile
 from metabase_sync.serialize.cards import read_card_file
 from metabase_sync.serialize.yamlio import write_frontmatter_sql, write_yaml
 
@@ -251,10 +251,17 @@ def _assert_query_persisted(
 def _rewrite_card_file(
     path: Path, fm: dict[str, Any], body: str | None, gui_query: dict[str, Any] | None
 ) -> None:
+    if "template_tags" in fm:
+        fm = fm | {"template_tags": strip_query_volatile(fm["template_tags"])}
     if body is not None:
         write_frontmatter_sql(path, canonical(fm, CARD), body)
     else:
-        write_yaml(path, canonical(fm | {"dataset_query": gui_query or {}}, CARD))
+        write_yaml(
+            path,
+            canonical(
+                fm | {"dataset_query": strip_query_volatile(gui_query or {})}, CARD
+            ),
+        )
 
 
 # --- diff ---------------------------------------------------------------------
