@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from metabase_sync.models import Collection
+from metabase_sync.serialize.canon import COLLECTION, canonical
 from metabase_sync.serialize.paths import CollectionPaths
 from metabase_sync.serialize.yamlio import load_yaml, write_yaml
 
@@ -71,13 +72,16 @@ def write_collections(collections: list[Collection], paths: CollectionPaths) -> 
         directory.mkdir(parents=True, exist_ok=True)
         write_yaml(
             directory / _COLLECTION_FILE,
-            {
-                "entity_id": c.entity_id,
-                "name": c.name,
-                "description": c.description,
-                "authority_level": c.authority_level,
-                "archived": c.archived,
-            },
+            canonical(
+                {
+                    "entity_id": c.entity_id,
+                    "name": c.name,
+                    "description": c.description,
+                    "authority_level": c.authority_level,
+                    "archived": c.archived,
+                },
+                COLLECTION,
+            ),
         )
 
 

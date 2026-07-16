@@ -6,6 +6,7 @@ from typing import Any
 
 from metabase_sync.diff import RemoteIndex
 from metabase_sync.plan import Change
+from metabase_sync.serialize.canon import COLLECTION, canonical
 from metabase_sync.serialize.collections import read_collections
 from metabase_sync.serialize.yamlio import write_yaml
 
@@ -35,6 +36,7 @@ def apply_collections(ctx: ApplyContext) -> None:
             "description": manifest.get("description"),
             "parent_id": parent_id,
             "authority_level": manifest.get("authority_level"),
+            "archived": manifest.get("archived", False),
         }
 
         if remote_collection is None:
@@ -52,7 +54,9 @@ def apply_collections(ctx: ApplyContext) -> None:
                 created = ctx.client.post("/api/collection", desired)
                 ctx.collection_id_by_disk_path[directory.resolve()] = int(created["id"])
                 manifest["entity_id"] = created.get("entity_id")
-                write_yaml(directory / "_collection.yaml", manifest)
+                write_yaml(
+                    directory / "_collection.yaml", canonical(manifest, COLLECTION)
+                )
             continue
 
         ctx.collection_id_by_disk_path[directory.resolve()] = int(
@@ -61,7 +65,7 @@ def apply_collections(ctx: ApplyContext) -> None:
         diffs = diff_fields(
             desired,
             remote_collection,
-            ("name", "description", "parent_id", "authority_level"),
+            ("name", "description", "parent_id", "authority_level", "archived"),
         )
         if diffs:
             ctx.plan.add(
@@ -87,7 +91,7 @@ def apply_collections(ctx: ApplyContext) -> None:
             )
         if eid != remote_collection.get("entity_id") and ctx.mode == "apply":
             manifest["entity_id"] = remote_collection.get("entity_id")
-            write_yaml(directory / "_collection.yaml", manifest)
+            write_yaml(directory / "_collection.yaml", canonical(manifest, COLLECTION))
 
 
 def _find_by_name_and_parent(

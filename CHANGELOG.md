@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-16
+
+Minor (not patch) because output formatting changes: the first export after
+upgrading canonicalizes existing state files once, and previously-undetected
+disk edits will surface as plan updates.
+
+### Fixed
+
+- **Every field the apply payload sends is now diffed; disk edits can no
+  longer plan as silent skips.** Previously each resource compared only a
+  subset of what it PUT, so edits to the uncompared fields never applied:
+  - Cards: `visualization_settings` (chart colours/metrics/dimensions),
+    `type`, `parameters`, `database_id`, `enable_embedding`,
+    `embedding_params`, `cache_ttl`.
+  - Dashboards: `parameters`, `width`, `position`, `cache_ttl`,
+    `enable_embedding`, `embedding_params`; dashcard tab moves,
+    `parameter_mappings`, `visualization_settings`, `series` (by card id) and
+    `action_id`. Dashcard `inline_parameters` was exported but silently
+    dropped from the PUT payload; it is now sent (only when authored) and
+    diffed.
+  - Pulses: `parameters`, `cards` (display/CSV/XLS/format/pivot/mappings) and
+    `channels` (schedules, enabled, recipients); `disable_links` and
+    `archived` were exported but never sent, and are now both sent and
+    diffed.
+  - Collections: `archived` was exported but never sent; now sent and diffed.
+  Container fields treat empty and missing as equal, and a missing remote card
+  `type` is never diffed against the default, so unchanged resources still
+  plan as skips (no perpetual re-PUTs).
+- **Apply write-back no longer corrupts GUI card files.** Stamping an
+  entity_id onto a newly created GUI card rewrote its full `dataset_query`
+  under the legacy `query:` key, which the reader then double-wrapped on the
+  next apply.
+- **Deterministic YAML key order on every write.** Exports and apply
+  write-backs now share per-resource canonical key templates (unknown keys
+  keep their order after the template) and nested mappings are sorted, so
+  hand-authored files, write-backs (entity_id no longer lands at the end of
+  the frontmatter) and re-exports produce stable, minimal diffs. The first
+  export after upgrading canonicalizes existing state once; after that,
+  diffs stay clean.
+
+### Testing
+
+- Unit coverage for every new diff (`test_card_diff.py`,
+  `test_dashboard_diff.py`, `test_pulse_diff.py`) and for canonical ordering
+  (`test_canon.py`); an integration regression proving a
+  settings-only disk edit plans as one update, applies, and settles
+  (`test_apply_semantics.py::test_settings_only_edit_plans_update_and_settles`).
+
 ## [0.1.3] — 2026-07-16
 
 ### Fixed

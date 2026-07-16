@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from metabase_sync.models import Snippet
+from metabase_sync.serialize.canon import SNIPPET, canonical
 from metabase_sync.serialize.paths import CollectionPaths, disambiguate, slugify
 from metabase_sync.serialize.yamlio import read_frontmatter_sql, write_frontmatter_sql
 
@@ -49,7 +50,7 @@ def write_snippets(
         filename = f"{slug}.sql"
         path = parent_dir / filename
         seen_files.add(path)
-        write_frontmatter_sql(path, frontmatter, s.content)
+        write_frontmatter_sql(path, canonical(frontmatter, SNIPPET), s.content)
 
     # Tidy: remove flat snippet files no longer in the export. (Snippets nested
     # under `collections/.../snippets/` are pruned by the collections wipe in

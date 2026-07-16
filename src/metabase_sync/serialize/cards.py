@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from metabase_sync.models import Card
+from metabase_sync.serialize.canon import CARD, canonical
 from metabase_sync.serialize.paths import disambiguate, slugify
 from metabase_sync.serialize.yamlio import (
     load_yaml,
@@ -82,7 +83,7 @@ def write_card(path: Path, card: Card, db_name_by_id: dict[int, str]) -> None:
             "template_tags": template_tags,
             **extra,
         }
-        write_frontmatter_sql(path, frontmatter, body)
+        write_frontmatter_sql(path, canonical(frontmatter, CARD), body)
     else:
         # GUI card. Pick the most informative dataset_query representation: prefer
         # legacy_query (classic form on old Metabase, MBQL5 on new), fall back to
@@ -93,7 +94,7 @@ def write_card(path: Path, card: Card, db_name_by_id: dict[int, str]) -> None:
             "dataset_query": dataset_query,
             **extra,
         }
-        write_yaml(path, doc)
+        write_yaml(path, canonical(doc, CARD))
 
 
 def read_card_file(

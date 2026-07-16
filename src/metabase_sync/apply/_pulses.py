@@ -13,10 +13,17 @@ from typing import Any
 
 from metabase_sync.diff import RemoteIndex
 from metabase_sync.plan import Change
+from metabase_sync.serialize.canon import PULSE, PULSE_CHILDREN, canonical
 from metabase_sync.serialize.pulses import read_pulses
 from metabase_sync.serialize.yamlio import write_yaml
 
-from ._shared import ApplyContext, diff_fields, resolve_card_path, summarize_diffs
+from ._shared import (
+    ApplyContext,
+    diff_container_fields,
+    diff_fields,
+    resolve_card_path,
+    summarize_diffs,
+)
 
 log = logging.getLogger(__name__)
 
@@ -81,14 +88,10 @@ def apply_pulses(ctx: ApplyContext) -> None:
             if ctx.mode == "apply":
                 created = ctx.client.post("/api/pulse", desired)
                 doc["entity_id"] = created.get("entity_id")
-                write_yaml(path, doc)
+                write_yaml(path, canonical(doc, PULSE, PULSE_CHILDREN))
             continue
 
-        diffs = diff_fields(
-            desired,
-            remote_pulse,
-            ("name", "collection_id", "dashboard_id", "skip_if_empty"),
-        )
+        diffs = _pulse_diffs(desired, remote_pulse)
         if diffs:
             ctx.plan.add(
                 Change(
@@ -108,6 +111,62 @@ def apply_pulses(ctx: ApplyContext) -> None:
                     resource="pulses", action="skip", relpath=relpath, name=doc["name"]
                 )
             )
+
+
+def _pulse_diffs(
+    desired: dict[str, Any], remote: dict[str, Any]
+) -> list[tuple[str, Any, Any]]:
+    diffs = diff_fields(
+        desired,
+        remote,
+        (
+            "name",
+            "collection_id",
+            "dashboard_id",
+            "skip_if_empty",
+            "disable_links",
+            "archived",
+        ),
+    )
+    diffs.extend(diff_container_fields(desired, remote, ("parameters",)))
+
+    desired_cards = [_card_projection(c) for c in desired.get("cards") or []]
+    remote_cards = [_card_projection(c) for c in remote.get("cards") or []]
+    if desired_cards != remote_cards:
+        diffs.append(("cards", f"{len(remote_cards)} → {len(desired_cards)}", None))
+
+    desired_channels = [_channel_projection(c) for c in desired.get("channels") or []]
+    remote_channels = [_channel_projection(c) for c in remote.get("channels") or []]
+    if desired_channels != remote_channels:
+        diffs.append(
+            ("channels", f"{len(remote_channels)} → {len(desired_channels)}", None)
+        )
+    return diffs
+
+
+def _card_projection(card: dict[str, Any]) -> tuple:
+    return (
+        card.get("id"),
+        card.get("display"),
+        card.get("include_csv") or False,
+        card.get("include_xls") or False,
+        card.get("format_rows", True),
+        card.get("pivot_results") or False,
+        card.get("parameter_mappings") or None,
+    )
+
+
+def _channel_projection(channel: dict[str, Any]) -> tuple:
+    return (
+        channel.get("channel_type"),
+        channel.get("schedule_type"),
+        channel.get("schedule_hour"),
+        channel.get("schedule_day"),
+        channel.get("schedule_frame"),
+        channel.get("enabled", True),
+        channel.get("channel_id"),
+        sorted(r.get("id") for r in (channel.get("recipients") or []) if r.get("id")),
+    )
 
 
 def _find_by_dashboard_and_name(
@@ -176,6 +235,8 @@ def _build_pulse_payload(
         "collection_id": collection_id,
         "dashboard_id": dashboard_id,
         "skip_if_empty": doc.get("skip_if_empty", False),
+        "disable_links": doc.get("disable_links", False),
+        "archived": doc.get("archived", False),
         "parameters": doc.get("parameters", []),
         "cards": cards,
         "channels": channels,

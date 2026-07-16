@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from metabase_sync.models import Pulse, PulseChannel
+from metabase_sync.serialize.canon import PULSE, PULSE_CHILDREN, canonical
 from metabase_sync.serialize.cards import CardPaths
 from metabase_sync.serialize.dashboards import DashboardPaths
 from metabase_sync.serialize.paths import CollectionPaths, disambiguate, slugify
@@ -39,7 +40,7 @@ def write_pulses(
             p, pulse_file, collection_paths, card_paths, dashboard_paths
         )
         seen_files.add(filename)
-        write_yaml(pulse_file, doc)
+        write_yaml(pulse_file, canonical(doc, PULSE, PULSE_CHILDREN))
     for existing in out.glob("*.yaml"):
         if existing.name not in seen_files:
             existing.unlink()

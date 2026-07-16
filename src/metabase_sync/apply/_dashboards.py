@@ -10,10 +10,17 @@ from metabase_sync.client import MetabaseClient
 from metabase_sync.diff import RemoteIndex
 from metabase_sync.errors import ReferenceResolutionError
 from metabase_sync.plan import Change
+from metabase_sync.serialize.canon import DASHBOARD, DASHBOARD_CHILDREN, canonical
 from metabase_sync.serialize.dashboards import read_dashboard_files
 from metabase_sync.serialize.yamlio import write_yaml
 
-from ._shared import ApplyContext, diff_fields, resolve_card_path, summarize_diffs
+from ._shared import (
+    ApplyContext,
+    diff_container_fields,
+    diff_fields,
+    resolve_card_path,
+    summarize_diffs,
+)
 
 
 def apply_dashboards(ctx: ApplyContext) -> None:
@@ -40,6 +47,7 @@ def apply_dashboards(ctx: ApplyContext) -> None:
             "enable_embedding": doc.get("enable_embedding", False),
             "embedding_params": doc.get("embedding_params"),
             "width": doc.get("width", "fixed"),
+            "position": doc.get("position"),
             "archived": doc.get("archived", False),
         }
 
@@ -64,7 +72,9 @@ def apply_dashboards(ctx: ApplyContext) -> None:
                 dashboard_id = int(created["id"])
                 ctx.dashboard_id_by_disk_path[directory.resolve()] = dashboard_id
                 doc["entity_id"] = created.get("entity_id")
-                write_yaml(dashboard_file, doc)
+                write_yaml(
+                    dashboard_file, canonical(doc, DASHBOARD, DASHBOARD_CHILDREN)
+                )
                 _put_full(
                     ctx.client,
                     dashboard_id,
@@ -76,11 +86,7 @@ def apply_dashboards(ctx: ApplyContext) -> None:
             continue
 
         ctx.dashboard_id_by_disk_path[directory.resolve()] = int(remote_dashboard["id"])
-        diffs = diff_fields(
-            desired,
-            remote_dashboard,
-            ("name", "description", "collection_id", "auto_apply_filters", "archived"),
-        )
+        diffs = _metadata_diffs(desired, remote_dashboard)
         contents_diff = _contents_diff(
             doc, remote_dashboard, directory, ctx.card_id_by_disk_path
         )
@@ -135,6 +141,30 @@ def _find_by_collection_and_name(
     return None
 
 
+def _metadata_diffs(
+    desired: dict[str, Any], remote: dict[str, Any]
+) -> list[tuple[str, Any, Any]]:
+    diffs = diff_fields(
+        desired,
+        remote,
+        (
+            "name",
+            "description",
+            "collection_id",
+            "auto_apply_filters",
+            "archived",
+            "width",
+            "position",
+            "cache_ttl",
+            "enable_embedding",
+        ),
+    )
+    diffs.extend(
+        diff_container_fields(desired, remote, ("parameters", "embedding_params"))
+    )
+    return diffs
+
+
 def _contents_diff(
     doc: dict[str, Any],
     remote_dashboard: dict[str, Any],
@@ -155,23 +185,38 @@ def _contents_diff(
     if desired_tabs != remote_tabs:
         parts.append(f"tabs: {len(remote_tabs)} → {len(desired_tabs)}")
 
+    tab_position_by_id = {
+        t.get("id"): t.get("position") for t in (remote_dashboard.get("tabs") or [])
+    }
     desired_dc = [
         (
             resolve_card_path(dc.get("card_path"), dashboard_dir, card_id_by_disk_path),
+            dc.get("tab_position"),
             dc.get("row"),
             dc.get("col"),
             dc.get("size_x"),
             dc.get("size_y"),
+            dc.get("parameter_mappings") or None,
+            dc.get("visualization_settings") or None,
+            [s.get("id") for s in (dc.get("series") or [])],
+            dc.get("action_id"),
+            dc.get("inline_parameters") or None,
         )
         for dc in (doc.get("dashcards") or [])
     ]
     remote_dc = [
         (
             dc.get("card_id"),
+            tab_position_by_id.get(dc.get("dashboard_tab_id")),
             dc.get("row"),
             dc.get("col"),
             dc.get("size_x"),
             dc.get("size_y"),
+            dc.get("parameter_mappings") or None,
+            dc.get("visualization_settings") or None,
+            [s.get("id") for s in (dc.get("series") or [])],
+            dc.get("action_id"),
+            dc.get("inline_parameters") or None,
         )
         for dc in (remote_dashboard.get("dashcards") or [])
     ]
@@ -252,6 +297,12 @@ def _build_dashcards_payload(
                 "visualization_settings": dc.get("visualization_settings", {}),
                 "series": dc.get("series", []),
                 "action_id": dc.get("action_id"),
+                # Only send when authored: older versions reject unknown keys.
+                **(
+                    {"inline_parameters": dc["inline_parameters"]}
+                    if dc.get("inline_parameters")
+                    else {}
+                ),
             }
         )
     return out

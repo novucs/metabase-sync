@@ -47,6 +47,18 @@ def diff_fields(
     return out
 
 
+def diff_container_fields(
+    desired: dict[str, Any], remote: dict[str, Any], keys: tuple[str, ...]
+) -> list[tuple[str, Any, Any]]:
+    """Per-field diff for list/dict fields where None and empty are
+    interchangeable on the wire."""
+    out: list[tuple[str, Any, Any]] = []
+    for k in keys:
+        if (desired.get(k) or None) != (remote.get(k) or None):
+            out.append((k, remote.get(k), desired.get(k)))
+    return out
+
+
 def summarize_diffs(diffs: list[tuple[str, Any, Any]]) -> str:
     return "; ".join(
         diff_summary(field, before, after) for field, before, after in diffs

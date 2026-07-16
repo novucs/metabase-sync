@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from metabase_sync.models import Dashboard, Dashcard, Tab
+from metabase_sync.serialize.canon import DASHBOARD, DASHBOARD_CHILDREN, canonical
 from metabase_sync.serialize.cards import CardPaths
 from metabase_sync.serialize.paths import CollectionPaths, disambiguate, slugify
 from metabase_sync.serialize.yamlio import load_yaml, write_yaml
@@ -73,7 +74,9 @@ def write_dashboard(
             for dc in dashboard.dashcards
         ],
     }
-    write_yaml(directory / "dashboard.yaml", doc)
+    write_yaml(
+        directory / "dashboard.yaml", canonical(doc, DASHBOARD, DASHBOARD_CHILDREN)
+    )
 
 
 def _tab_to_doc(tab: Tab) -> dict[str, Any]:

@@ -18,11 +18,14 @@ from pathlib import Path
 from typing import Any
 
 from metabase_sync.plan import Change
+from metabase_sync.serialize.canon import CARD, canonical
 from metabase_sync.serialize.cards import read_card_file
 from metabase_sync.serialize.yamlio import write_frontmatter_sql, write_yaml
 
 from ._shared import (
     ApplyContext,
+    diff_container_fields,
+    diff_fields,
     normalize_dataset_query,
     summarize_diffs,
 )
@@ -249,9 +252,9 @@ def _rewrite_card_file(
     path: Path, fm: dict[str, Any], body: str | None, gui_query: dict[str, Any] | None
 ) -> None:
     if body is not None:
-        write_frontmatter_sql(path, fm, body)
+        write_frontmatter_sql(path, canonical(fm, CARD), body)
     else:
-        write_yaml(path, fm | {"query": gui_query or {}})
+        write_yaml(path, canonical(fm | {"dataset_query": gui_query or {}}, CARD))
 
 
 # --- diff ---------------------------------------------------------------------
@@ -260,10 +263,36 @@ def _rewrite_card_file(
 def _diff_card(
     desired: dict[str, Any], remote: dict[str, Any]
 ) -> list[tuple[str, Any, Any]]:
-    diffs: list[tuple[str, Any, Any]] = []
-    for k in ("name", "description", "display", "collection_id", "archived"):
-        if desired.get(k) != remote.get(k):
-            diffs.append((k, remote.get(k), desired.get(k)))
+    diffs = diff_fields(
+        desired,
+        remote,
+        (
+            "name",
+            "description",
+            "display",
+            "collection_id",
+            "archived",
+            "database_id",
+            "enable_embedding",
+            "cache_ttl",
+        ),
+    )
+    diffs.extend(
+        diff_container_fields(desired, remote, ("parameters", "embedding_params"))
+    )
+    # Older versions omit card type; never diff against the default then.
+    if remote.get("type") is not None and desired.get("type") != remote.get("type"):
+        diffs.append(("type", remote.get("type"), desired.get("type")))
+
+    desired_vs = desired.get("visualization_settings") or {}
+    remote_vs = remote.get("visualization_settings") or {}
+    if desired_vs != remote_vs:
+        changed = sorted(
+            k
+            for k in desired_vs.keys() | remote_vs.keys()
+            if desired_vs.get(k) != remote_vs.get(k)
+        )
+        diffs.append(("visualization_settings", ", ".join(changed), None))
 
     remote_dq = _remote_dataset_query(remote)
     if remote_dq is None:

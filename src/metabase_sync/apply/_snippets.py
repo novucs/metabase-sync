@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 
 from metabase_sync.plan import Change
+from metabase_sync.serialize.canon import SNIPPET, canonical
 from metabase_sync.serialize.snippets import (
     read_snippets,
     resolve_snippet_collection_dir,
@@ -66,7 +67,7 @@ def apply_snippets(ctx: ApplyContext) -> None:
             if ctx.mode == "apply":
                 created = ctx.client.post("/api/native-query-snippet", desired)
                 fm["entity_id"] = created.get("entity_id")
-                write_frontmatter_sql(path, fm, body)
+                write_frontmatter_sql(path, canonical(fm, SNIPPET), body)
             continue
 
         diffs = diff_fields(
