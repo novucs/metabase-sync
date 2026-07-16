@@ -119,15 +119,16 @@ def _pulse_diffs(
     diffs = diff_fields(
         desired,
         remote,
-        (
-            "name",
-            "collection_id",
-            "dashboard_id",
-            "skip_if_empty",
-            "disable_links",
-            "archived",
-        ),
+        ("name", "collection_id", "dashboard_id", "skip_if_empty", "archived"),
     )
+    # Metabase <= v0.55 returns disable_links as null; never diff the default
+    # against it.
+    if remote.get("disable_links") is not None and desired.get(
+        "disable_links"
+    ) != remote.get("disable_links"):
+        diffs.append(
+            ("disable_links", remote.get("disable_links"), desired.get("disable_links"))
+        )
     diffs.extend(diff_container_fields(desired, remote, ("parameters",)))
 
     desired_cards = [_card_projection(c) for c in desired.get("cards") or []]
@@ -235,8 +236,9 @@ def _build_pulse_payload(
         "collection_id": collection_id,
         "dashboard_id": dashboard_id,
         "skip_if_empty": doc.get("skip_if_empty", False),
-        "disable_links": doc.get("disable_links", False),
-        "archived": doc.get("archived", False),
+        # `or False`: state exported from v0.55 stores an explicit null.
+        "disable_links": doc.get("disable_links") or False,
+        "archived": doc.get("archived") or False,
         "parameters": doc.get("parameters", []),
         "cards": cards,
         "channels": channels,

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-07-16
+
+### Fixed
+
+- **Pulses no longer plan a perpetual `disable_links: null → False` update on
+  Metabase <= v0.55.** Those versions return `disable_links` as null, which
+  the 0.2.0 pulse diff compared against the default. A null remote value is
+  never diffed against the default, and a null on disk (state exported from
+  such a version) is sent as false.
+
+### Testing
+
+- Unit coverage for the null-remote case (`test_pulse_diff.py`); the full
+  integration suite verified against Metabase v0.55.16 and the pinned
+  v0.62.2.
+
 ## [0.2.0] — 2026-07-16
 
 Minor (not patch) because output formatting changes: the first export after

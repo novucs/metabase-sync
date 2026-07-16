@@ -110,3 +110,9 @@ def test_flags_and_parameters_detected():
     desired = _desired(disable_links=True, archived=True, parameters=[{"id": "p1"}])
     fields = {f for f, _b, _a in _pulse_diffs(desired, _remote())}
     assert {"disable_links", "archived", "parameters"} <= fields
+
+
+def test_null_remote_disable_links_does_not_diff():
+    # Metabase v0.55 returns disable_links as null; the default must not
+    # plan an update forever against it.
+    assert _pulse_diffs(_desired(), _remote(disable_links=None)) == []
