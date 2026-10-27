@@ -86,6 +86,7 @@ def _client_from_settings(s):
         timeout_s=s.http_timeout_s,
         max_retries=s.http_max_retries,
         retry_backoff_s=s.http_retry_backoff_s,
+        headers=s.metabase_headers,
     )
 
 

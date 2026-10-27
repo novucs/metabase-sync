@@ -68,10 +68,15 @@ class MetabaseClient:
         timeout_s: float = 120.0,
         max_retries: int = 3,
         retry_backoff_s: float = 1.0,
+        headers: dict[str, str] | None = None,
     ) -> None:
         self._http = httpx.Client(
             base_url=base_url.rstrip("/"),
-            headers={"X-API-Key": api_key, "Accept": "application/json"},
+            headers={
+                **(headers or {}),
+                "X-API-Key": api_key,
+                "Accept": "application/json",
+            },
             timeout=timeout_s,
             transport=httpx.HTTPTransport(retries=max_retries),
         )

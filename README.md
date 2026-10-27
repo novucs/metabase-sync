@@ -167,6 +167,7 @@ state/
 | --- | --- | --- | --- |
 | `METABASE_URL` | yes | — | e.g. `https://metabase.example.com` |
 | `METABASE_API_KEY` | yes | — | Admin API key (see below) |
+| `METABASE_HEADERS` | no | `{}` | JSON object of extra request headers, e.g. `{"Authorization": "Bearer ..."}` for an auth proxy in front of Metabase |
 | `STATE_DIR` | no | `state/` | Relative to CWD |
 | `HTTP_TIMEOUT_S` | no | `120` | Per HTTP request (large cards' `result_metadata` recompute can take time) |
 | `HTTP_MAX_RETRIES` | no | `3` | Retries on 408 / 429 / 502 / 503 / 504 / connection errors |

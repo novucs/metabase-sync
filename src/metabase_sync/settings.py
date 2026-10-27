@@ -22,6 +22,7 @@ class Settings(BaseSettings):
 
     metabase_url: str
     metabase_api_key: str
+    metabase_headers: dict[str, str] = Field(default_factory=dict)
     state_dir: Path = Field(default=Path("state"))
     http_timeout_s: float = Field(default=120.0)
     http_max_retries: int = Field(default=3)
