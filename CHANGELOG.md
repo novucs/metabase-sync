@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-27
+
+### Fixed
+
+- **Native cards export and apply on Metabase v0.64.3+.** Those versions
+  return a native stage's `template-tags` as a list instead of a map keyed by
+  tag name, which crashed apply. Export now converts the list back to the map,
+  so state files keep the same shape across versions.
+
+### Testing
+
+- Unit coverage for list-form template tags (`test_legacy_query.py`); the
+  integration suite verified against Metabase v0.64.3.5 and the pinned v0.62.2.
+
 ## [0.3.0] - 2026-10-27
 
 ### Added

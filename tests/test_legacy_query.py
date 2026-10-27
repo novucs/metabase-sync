@@ -13,6 +13,7 @@ from pathlib import Path
 
 import yaml
 
+from metabase_sync.apply._cards import _build_dataset_query
 from metabase_sync.models import Card
 from metabase_sync.serialize.cards import read_card_file, write_card
 
@@ -123,6 +124,41 @@ def test_native_card_from_mbql5_stage_round_trip(tmp_path: Path):
     assert body == "SELECT 99"
     assert gui is None
     assert fm["database"] == "sample"
+
+
+def test_mbql5_stage_template_tag_list_round_trips_to_apply(tmp_path: Path):
+    tag = {
+        "id": "fixed-uuid",
+        "name": "date_range",
+        "display-name": "Date Range",
+        "type": "dimension",
+        "dimension": ["field", {"base-type": "type/DateTime"}, 31],
+    }
+    card = _make_native_card(
+        legacy_query=None,
+        dataset_query={
+            "lib/type": "mbql/query",
+            "database": 2,
+            "stages": [
+                {
+                    "lib/type": "mbql.stage/native",
+                    "native": "SELECT 1 WHERE {{date_range}}",
+                    "template-tags": [tag],
+                }
+            ],
+        },
+    )
+    path = tmp_path / "card.sql"
+    write_card(path, card, db_name_by_id={2: "sample"})
+
+    fm, body, _ = read_card_file(path)
+    dq = _build_dataset_query(fm, body, None, 2)
+    assert dq["native"]["template-tags"] == {
+        "date_range": {
+            **tag,
+            "dimension": ["field", 31, {"base-type": "type/DateTime"}],
+        }
+    }
 
 
 def test_export_prefers_live_dataset_query_over_stale_legacy_query(tmp_path: Path):

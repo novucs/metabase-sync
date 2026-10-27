@@ -168,7 +168,10 @@ def _native_query(query: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
         if isinstance(stage, dict) and stage.get("lib/type") == "mbql.stage/native":
             sql = stage.get("native")
             if isinstance(sql, str):
-                return sql, stage.get("template-tags") or {}
+                tags = stage.get("template-tags") or {}
+                if isinstance(tags, list):
+                    tags = {tag["name"]: tag for tag in tags}
+                return sql, tags
 
     return None
 
