@@ -1,36 +1,55 @@
-from pathlib import Path
+from typing import Self
 
-from pydantic import Field
+from pydantic import (
+    Field,
+    Json,
+    PositiveFloat,
+    PositiveInt,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from metabase_sync.errors import ConfigError, describe
 
 
 class Settings(BaseSettings):
-    """Runtime config.
-
-    Both `METABASE_URL` and `METABASE_API_KEY` are required (no defaults). They
-    can come from the process env or from a `.env` file in the current working
-    directory. `state_dir` defaults to `state/` relative to the CWD, so you can
-    run `metabase-sync export` from inside `infrastructure/metabase/` (or
-    anywhere you keep your state tree) without flag-wrangling.
-    """
-
     model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
+        env_prefix="METABASE_", env_file=".env", extra="ignore", frozen=True
     )
 
-    metabase_url: str
-    metabase_api_key: str
-    metabase_headers: dict[str, str] = Field(default_factory=dict)
-    state_dir: Path = Field(default=Path("state"))
-    http_timeout_s: float = Field(default=120.0)
-    http_max_retries: int = Field(default=3)
-    http_retry_backoff_s: float = Field(default=1.0)
+    url: str = ""
+    api_key: SecretStr | None = None
+    headers: Json[dict[str, str]] = Field(default={}, validate_default=False)
+    timeout: PositiveFloat = 120.0
+    concurrency: PositiveInt = 12
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value: object) -> object:
+        return value or None
+
+    @model_validator(mode="after")
+    def _complete(self) -> Self:
+        if not self.url:
+            raise ValueError("METABASE_URL is not set")
+        if self.api_key is None and not self.headers:
+            raise ValueError("set METABASE_API_KEY, or credentials in METABASE_HEADERS")
+        return self
+
+    @property
+    def base(self) -> str:
+        return self.url.rstrip("/")
 
 
-def load_settings(state_dir: Path | None = None) -> Settings:
-    s = Settings()  # type: ignore[call-arg]
-    if state_dir is not None:
-        s = s.model_copy(update={"state_dir": state_dir})
-    return s
+def load_settings() -> Settings:
+    try:
+        return Settings()
+    except ValidationError as e:
+        raise ConfigError(
+            "; ".join(describe(e, env_prefix="METABASE_")),
+            hint="export METABASE_URL=https://metabase.example.com, and create an "
+            "API key under Admin settings > Authentication > API keys",
+        ) from e

@@ -3,8 +3,7 @@ name: Metabase plan
 on:
   pull_request:
     paths:
-      - "infrastructure/metabase/state/**"
-      - "infrastructure/metabase/.env.example"
+      - "metabase/**"
 
 permissions:
   contents: read
@@ -23,7 +22,7 @@ jobs:
 
       - name: Plan
         id: plan
-        working-directory: infrastructure/metabase
+        working-directory: metabase
         env:
           METABASE_URL: ${{ secrets.METABASE_URL }}
           METABASE_API_KEY: ${{ secrets.METABASE_API_KEY }}

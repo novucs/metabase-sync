@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A rewrite. Files from 0.3 are not compatible; export into a new directory once.
+
+### Changed
+
+- Files use the metabase/representations format: one YAML file per item, references by entity id, and databases, tables, and fields by name. They pass Metabase's own validator, write the fields it requires, write a dashcard's tab as `[dashboard, tab]`, and leave out the deprecated `cache_ttl`.
+- Files with unknown or misspelt fields are rejected with the file and field named.
+- Commands run in the current directory, or in `--chdir DIR` (`METABASE_SYNC_CHDIR`), instead of `--state-dir`.
+- Tested on Metabase 0.58 (LTS), 0.64 (LTS), and 0.65; other versions from 0.58 on run with a warning. Use 0.3 for 0.55 to 0.57.
+- Requires Python 3.15.
+- `export` and `plan` fetch list endpoints and dashboard details concurrently.
+- `apply` asks for confirmation unless given `--auto-approve` or a saved plan.
+- Subscriptions take their name and cards from their dashboard.
+- Dashboard filters are written with the dashboard's cards, so a filter can take its values from a card created in the same apply.
+- Removals run in parallel, each after the items that reference it.
+- `plan` never changes files; after an interrupted apply it asks you to run `apply`, which finishes it.
+- Metabase Enterprise versions (`v1.x`) are checked like the matching open-source versions.
+- HTTP goes through requests, with urllib3 handling retries and `Retry-After`.
+- File names transliterate non-Latin names instead of dropping them.
+
+### Added
+
+- `init`, `status`, `validate`, and `fmt` commands.
+- `metabase-sync.state` records each item's content at the last sync. `export` keeps edits you haven't applied, `apply` leaves changes made in Metabase alone, and edits on both sides stop as a conflict until `--force`.
+- `plan` shows a diff for each change, and one entry per item.
+- New files need no entity id; `apply` writes the one Metabase assigns.
+- A file for an item that already exists in Metabase, matched by entity id or by name and place, plans as an import instead of a duplicate.
+- `plan --out` and `apply PLANFILE`, refused if Metabase or the files changed since planning.
+- `plan --json` and `--detailed-exitcode`; `export --check`.
+- Command help with examples; `--verbose` and `--debug`.
+- Removing a file archives the item (or deletes it with `removal: delete`). Only items in the state file are touched; removing a collection or dashboard that holds other items stops as a conflict.
+- Subscription `attachments` keep CSV and XLSX settings.
+- Restoring a file restores the archived item instead of creating a copy.
+- `collections` in `metabase-sync.yaml` limits the files to chosen collections.
+- `METABASE_TIMEOUT` and `METABASE_CONCURRENCY`.
+- `apply` checks Metabase afterwards and fails, naming the items, if Metabase didn't keep a change, such as an unknown key in a dashboard filter.
+- Cards and dashboards keep their `embedding_type` (static or guest embed).
+- `plan` stops when a dashboard filter sits on a dashcard you removed, since Metabase removes the filter with it.
+- Questions inside documents are left out of the files and listed as unmanaged.
+
+### Fixed
+
+- An interrupted export no longer deletes files.
+- `apply` no longer fails with 404 on items Metabase already archived along with their collection or card.
+- A create whose response is lost is never sent twice; `apply` stops, and the next run finds the created item.
+- An apply interrupted partway through an item finishes on the next run instead of reporting a conflict.
+- `apply PLANFILE` stops if Metabase or the files changed after planning, instead of overwriting the edit.
+- GUI questions no longer show changes on every export, and clauses added by hand converge.
+- Same-named items no longer swap paths between exports.
+- Adding a question to an existing dashboard, or restoring a card or dashboard archived in the UI, no longer fails as a stale plan or creates a second subscription.
+- Questions that link to each other or to themselves can be created together.
+- Dashboard link cards reference their target by entity id.
+- Subscription recipients compare without regard to order or case.
+- With `collections` set, a file placed outside those collections is rejected instead of being created again on every apply.
+- A file whose entity id belongs to a different kind of item in Metabase is rejected.
+- A reference to a field or table that Metabase has deactivated, including a model column's foreign-key target, is kept with a warning instead of aborting.
+- A new file that can't be matched to one item in Metabase by name stops as a conflict instead of creating a duplicate; `--force` still creates it.
+- Dashcards and tabs are matched only within their own dashboard, so a file copied from another dashboard creates new ones.
+- New items with the same name in the same place are created one at a time, so a lost response is never matched to its sibling.
+- A reference to a field or table that no longer exists is kept with a warning instead of aborting.
+- Collections are created one at a time, because Metabase fails concurrent collection creates.
+- Recovering a lost create no longer depends on the local clock matching the server's.
+- `fmt` reports invalid YAML by file, and rewriting files keeps those that are not YAML.
+- A retried delete that finds the item already gone succeeds.
+- Commands in a directory without `metabase-sync.yaml` say so instead of reporting no changes.
+- An unreachable Metabase is reported in one line, without retry logs.
+- Hand-written files converge when they leave out optional values Metabase fills in, such as a channel's `enabled` and `recipients`, or a model's `result_metadata`.
+- Dashboard `width`, `auto_apply_filters`, and embedding settings, and card `collection_preview`, are applied on create.
+- Messages go to stderr, so `plan --json` output stays parseable.
+- A subscription's `disable_links` no longer plans an update Metabase can't make.
+- New pinned questions and dashboards keep their pinned positions when created together.
+- A new question that links to a question its query uses is created after it.
+- Dashboards created by an API key export with their creator.
+- A query clause added in Metabase ahead of existing ones no longer merges their references.
+- `export` before `apply` keeps a new file for an item that already exists in Metabase, instead of writing a second file and creating a duplicate on the next apply.
+- Removing the file of a model written without its columns archives it instead of reporting a conflict.
+- A lost create is no longer mistaken for a duplicate of an item created alongside it, such as two subscriptions on one dashboard.
+
+### Removed
+
+- `index`, `diagnose`, `doctor` (use `status`), `apply --only`, `apply --backup-dir`, and the `STATE_DIR`, `HTTP_TIMEOUT_S`, `HTTP_MAX_RETRIES`, and `HTTP_RETRY_BACKOFF_S` variables.
+- The httpx and tenacity dependencies.
+
 ## [0.3.1] - 2026-10-27
 
 ### Fixed

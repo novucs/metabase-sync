@@ -5,276 +5,202 @@
 [![CI](https://github.com/novucs/metabase-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/novucs/metabase-sync/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Metabase as code. `export`, `plan`, and `apply` your dashboards, cards, collections, snippets and pulses via the regular Metabase REST API. Works with Metabase **OSS** (no Enterprise license required).
+Metabase as code for the open-source edition. Export collections, questions, models, dashboards, snippets, and dashboard subscriptions to YAML in the [metabase/representations](https://github.com/metabase/representations) format, review changes in git, and apply them back with a Terraform-style `plan` and `apply`.
 
 ```
 $ metabase-sync plan
+  ~ update card 'Orders by date'  collections/main/sales/orders_by_date.yaml
+      --- metabase
+      +++ collections/main/sales/orders_by_date.yaml
+      @@ -8,7 +8,7 @@
+             native: |-
+      -        SELECT count(*)
+      +        SELECT count(*) AS orders
+               FROM orders
+  + create dashboard 'Q4 review'  collections/main/sales/q4_review.yaml
+  - archive card 'Old revenue chart'
 
-plan ← state/
-
-collections: 0 create, 0 update, 12 skip
-cards:       1 create, 1 update, 48 skip
-  CREATE  collections/finance/cards/q4-revenue.sql                  Q4 Revenue — SELECT SUM(revenue) FROM finance.q4
-  UPDATE  collections/finance/cards/profit-margin.sql               SQL: 23 → 25 lines, +2 −0
-dashboards:  1 create, 0 update, 8 skip
-  CREATE  collections/finance/dashboards/q4-review/dashboard.yaml   Q4 Review (1 dashcards)
-
-2 create, 1 update, 68 skip
-run `metabase-sync apply` to apply this plan.
+Plan: 1 to create, 1 to update, 1 to archive.
 ```
-
-## Why this exists
-
-Metabase's [official serialization](https://www.metabase.com/docs/latest/installation-and-operation/serialization) and Remote Sync are gated behind Enterprise / Pro. If you self-host the open-source edition, the `/api/ee/serialization/*` endpoints return 404 and you have no first-party way to put your dashboards under version control.
-
-This tool wraps the plain REST API and gives you the same workflow without the licence wall:
-
-- One YAML/SQL tree per Metabase instance, suitable for git.
-- A `plan` / `apply` loop that reads exactly like Terraform.
-- Round-trip determinism: `export` → `apply` → `export` produces zero diff.
-- Code-first authoring: drop a new `.sql` and a new `dashboard.yaml`, run `apply`, done. No need to know any Metabase ids ahead of time.
 
 ## Install
 
 ```bash
-uv tool install metabase-sync         # recommended: isolated install
-# or
-pipx install metabase-sync
-# or
-pip install metabase-sync
+uv tool install metabase-sync
 ```
+
+Tested on Metabase 0.58 (LTS), 0.64 (LTS), and 0.65, with Python 3.15. Versions in between, and newer ones, work with a warning. For Metabase 0.55 to 0.57, use metabase-sync 0.3.
 
 ## Quickstart
 
 ```bash
-mkdir my-metabase && cd my-metabase
-cat > .env <<EOF
-METABASE_URL=https://your-instance.example.com
-METABASE_API_KEY=mb_...
-EOF
-metabase-sync export        # creates ./state/
-git init && git add state && git commit -m "import metabase state"
+export METABASE_URL=https://metabase.example.com
+export METABASE_API_KEY=mb_...
+mkdir metabase && cd metabase
+metabase-sync init
+metabase-sync export
+git add . && git commit -m "export metabase"
 ```
 
-Then your day-to-day:
+The API key must belong to the Administrators group (Admin settings > Authentication > API keys).
+
+Day to day, build in Metabase and export, or edit files and apply:
 
 ```bash
-# Edit a .sql or dashboard.yaml in your editor.
-metabase-sync plan          # see exactly what will change
-metabase-sync apply         # write changes
+metabase-sync status
+metabase-sync export
+metabase-sync plan
+metabase-sync apply
 ```
 
 ## Commands
 
-| Command | Purpose |
-| --- | --- |
-| `metabase-sync export` | Pull the live instance into the on-disk state tree. |
-| `metabase-sync plan` | Read-only diff. Prints a per-item report and writes `state/.plan.json`. |
-| `metabase-sync apply` | Re-derives the diff and executes it. Idempotent. |
-| `metabase-sync apply --only cards` | Restrict to one resource (`collections,snippets,cards,dashboards,pulses`). |
-| `metabase-sync index` | Debug: print remote resource counts. |
+| Command        | Does                                                                                                                                                                               |
+|----------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `init`         | Create `metabase-sync.yaml` and a `.gitignore`.                                                                                                                                    |
+| `export`       | Pull Metabase into the files, keeping edits you haven't applied. `--check` writes nothing and exits 2 if the files are out of date. `--force` takes Metabase's version everywhere. |
+| `status`       | Show interrupted runs, changes to apply, changes made in Metabase, conflicts, and problems.                                                                                        |
+| `plan`         | Show what `apply` would change, as a diff. `--out FILE` saves the plan, `--json` prints it as JSON, `--detailed-exitcode` exits 2 when there are changes or conflicts.             |
+| `apply [FILE]` | Apply the changes, after confirmation. With a saved plan, refuses if Metabase or the files changed since. `--auto-approve` skips the prompt.                                       |
+| `validate`     | Check the files offline.                                                                                                                                                           |
+| `fmt`          | Give files entity ids, and rewrite every file in canonical form and at its canonical path.                                                                                         |
 
-Both `plan` and `apply` re-fetch the live instance, so you can't apply a stale plan against a moved instance.
-
-## Authoring new cards and dashboards in code
-
-You don't need to know any Metabase ids ahead of time. Create the files; apply allocates the ids and writes them back.
-
-### A new card
-
-`state/collections/finance/cards/q4-revenue.sql`:
-
-```sql
----
-entity_id: null
-name: Q4 Revenue
-description: null
-type: question
-display: scalar
-database: bigquery
-parameters: []
-visualization_settings: {}
-enable_embedding: false
-embedding_params: null
-cache_ttl: null
-archived: false
-template_tags: {}
----
----body---
-SELECT SUM(revenue) FROM finance.q4
-```
-
-Run `plan` to see the CREATE line, then `apply`. The `entity_id: null` becomes the server-assigned nanoid in your local file after apply.
-
-### A new dashboard referencing a new card
-
-`state/collections/finance/dashboards/q4-review/dashboard.yaml`:
-
-```yaml
-entity_id: null
-name: Q4 Review
-description: null
-archived: false
-auto_apply_filters: true
-cache_ttl: null
-enable_embedding: false
-embedding_params: null
-position: null
-width: fixed
-parameters: []
-tabs: []
-dashcards:
-  - entity_id: null
-    card_path: ../../cards/q4-revenue.sql       # path relative to this dashboard dir
-    tab_position: null
-    row: 0
-    col: 0
-    size_x: 12
-    size_y: 6
-    parameter_mappings: []
-    visualization_settings: {}
-    series: []
-```
-
-`card_path` is the file path from this dashboard's directory to the card's `.sql` file. Apply resolves it after creating the card, then writes the new entity_id back to your file.
-
-## On-disk layout
-
-```
-state/
-  databases/<name>.yaml         # manifest only — name + engine, NO credentials
-  snippets/<slug>.sql           # YAML frontmatter + raw SQL body
-  collections/
-    <slug>/_collection.yaml
-           /<nested-slug>/_collection.yaml
-                         /cards/<slug>.sql or .yaml
-                         /dashboards/<slug>/dashboard.yaml
-                                           /cards/<slug>.sql   # dashboard-internal cards
-    root/cards/...              # cards directly under the root collection
-  pulses/<slug>.yaml            # dashboard subscriptions
-```
-
-- Native SQL cards: `.sql` file with YAML frontmatter + raw query body.
-- GUI / MBQL cards: `.yaml` file with the full `dataset_query` (classic or MBQL5) inlined.
-- Dashcards: reference cards by `card_path` (relative).
-- Pulses: reference cards by `card_path`, the target dashboard by `dashboard_path`. Recipients are stored by email.
-- Snippets without a collection live in `state/snippets/`; snippets inside a collection live in `state/collections/<...>/snippets/`.
-- Personal collections are filtered out.
-
-## Configuration
-
-| Env var | Required | Default | Notes |
-| --- | --- | --- | --- |
-| `METABASE_URL` | yes | — | e.g. `https://metabase.example.com` |
-| `METABASE_API_KEY` | yes | — | Admin API key (see below) |
-| `METABASE_HEADERS` | no | `{}` | JSON object of extra request headers, e.g. `{"Authorization": "Bearer ..."}` for an auth proxy in front of Metabase |
-| `STATE_DIR` | no | `state/` | Relative to CWD |
-| `HTTP_TIMEOUT_S` | no | `120` | Per HTTP request (large cards' `result_metadata` recompute can take time) |
-| `HTTP_MAX_RETRIES` | no | `3` | Retries on 408 / 429 / 502 / 503 / 504 / connection errors |
-| `HTTP_RETRY_BACKOFF_S` | no | `1.0` | Base delay; doubles per retry (1s, 2s, 4s) |
-
-A `.env` file in the current working directory is read automatically.
-
-API keys are minted from the Metabase admin UI (Settings → Admin settings → Authentication → API keys). The key needs admin permissions to fetch + write everything `export` and `apply` touch.
+Commands run in the current directory; `--chdir DIR` (or `METABASE_SYNC_CHDIR`) runs them in another. `--verbose` lists every file and HTTP request, and `--debug` shows tracebacks.
 
 ## Exit codes
 
-`plan` and `apply` follow the terraform convention so CI pipelines can fan out:
+| Code | Meaning                                                      |
+|------|--------------------------------------------------------------|
+| 0    | Success, no changes                                          |
+| 1    | Error, conflict, or apply declined                           |
+| 2    | `plan --detailed-exitcode` or `export --check` found changes |
 
-| Code | Meaning |
-| --- | --- |
-| 0 | Success and no changes (or apply finished cleanly) |
-| 1 | Error (HTTP failure, preflight failure, missing recipient, concurrency drift) |
-| 2 | `plan` detected pending changes (informational; not an error) |
+## Configuration
 
-## CI/CD recipes
+Environment variables, or a `.env` file in the current directory:
 
-See [`examples/`](examples/) for two GitHub Actions templates:
+| Variable               | Default |                                                              |
+|------------------------|---------|--------------------------------------------------------------|
+| `METABASE_URL`         |         | Required.                                                    |
+| `METABASE_API_KEY`     |         | Required unless `METABASE_HEADERS` carries the credentials.  |
+| `METABASE_HEADERS`     | `{}`    | JSON object of extra headers, for example for an auth proxy. |
+| `METABASE_TIMEOUT`     | `120`   | Seconds per request.                                         |
+| `METABASE_CONCURRENCY` | `12`    | Parallel requests.                                           |
 
-- [`github-actions-plan-on-pr.yml`](examples/github-actions-plan-on-pr.yml) — comment the plan output on every PR that touches `state/`.
-- [`github-actions-apply-on-merge.yml`](examples/github-actions-apply-on-merge.yml) — apply automatically on merge to `main`, gated by an environment approval.
+`metabase-sync.yaml`:
 
-## Round-trip guarantees
-
-- `export` is deterministic: byte-identical output across runs.
-- `plan` against a freshly-exported tree reports `nothing to do.`.
-- SQL bodies are byte-faithful — trailing whitespace and template-tag UUIDs survive the round-trip.
-
-## Caveats
-
-Before running this on a production Metabase, you should know:
-
-- **Apply overwrites concurrent UI edits unless you re-plan first.** `apply` runs a fresh `plan` and checks the captured `updated_at` for every item it touched. If a UI user has edited an item since you ran `plan`, apply aborts with the list and tells you to re-plan. Pass `--force` to overwrite anyway.
-- **Dashboard contents are a full replacement.** Tabs and dashcards are PUT in one go with client-assigned negative temp ids; the server replaces existing rows and allocates new `dashcard.entity_id`s. Two simultaneous applies race; wrap CI in a concurrency group to serialise them.
-- **Out-of-scope resources are silently NOT synced.** Alerts, segments, legacy metrics, permissions, users and groups are not part of the state tree. `export` prints a warning if it finds any so you don't discover this in production.
-- **Personal collections are excluded.** Cards/dashboards inside a user's personal collection don't appear in the export. Dashboards in shared collections that reference a personal-collection card will fail the reference preflight at plan time, not at apply time.
-- **`--delete` is not yet implemented.** Items removed from `state/` are not auto-archived on apply. Archive them through the UI or directly via the API. Passing `--delete` is rejected with exit code 2.
-
-### Pre-apply backup
-
-`apply --backup-dir <path>` re-exports the live instance to `<path>` before mutating. If apply messes something up, `metabase-sync apply --state-dir <path>` rolls forward against the backup.
-
-```bash
-metabase-sync apply --backup-dir /tmp/pre-apply-$(date +%Y%m%d-%H%M%S)
+```yaml
+collections:
+  - HyocLue0f_iGHD90nRWrl
+removal: archive
 ```
 
-## Troubleshooting / FAQ
+- `collections` limits the files to those collections and everything inside them. Leave it out to manage the whole instance.
+- `removal` is `archive` (the default) or `delete`. It decides what `apply` does with an item whose file you removed.
 
-**`401 Unauthorized` on the first call.** Your API key was revoked or you're pointed at the wrong instance. Run `metabase-sync diagnose` — it prints the URL and key length.
+## Changes on both sides
 
-**`plan` reports updates I didn't make.** Most often a Metabase version mismatch — server-generated `lib/uuid` values on GUI cards regenerate on every UI save. The tool strips them at diff time; if you still see noise, `metabase-sync export` once to refresh and try again.
+`metabase-sync.state` records each item's content at the last sync, so the tool can tell your edits from edits made in Metabase. Commit it with the files.
 
-**How do I rename a card?** Edit the `name:` in the frontmatter. The `entity_id` stays the same so the rename round-trips cleanly.
+| Your files | Metabase  | `export`                          | `plan` and `apply`            |
+|------------|-----------|-----------------------------------|-------------------------------|
+| unchanged  | changed   | takes Metabase's version          | leave it alone and list it    |
+| changed    | unchanged | keeps your file                   | apply your change             |
+| changed    | changed   | stops; `--force` takes Metabase's | stop; `--force` applies yours |
 
-**How do I move a card to another collection?** Move the file. The collection that contains the card is determined by its on-disk path; on apply the collection_id is rebound and Metabase moves it.
+Commit or apply your edits before `export --force`; it overwrites them.
 
-**How do I delete a card?** Archive it via the Metabase UI for now. The `--delete` flag is not implemented in this release. After archival, re-export and commit.
+## What isn't managed
 
-**`metabase-sync diagnose` to file a bug.** It captures everything we'd ask for in a triage thread. Paste the output into the GitHub issue template.
+- Questions inside documents. `plan` lists them as unmanaged.
+- Snippet folders, a paid-plan feature. Snippets are written without their folder.
+- Public links.
+- Personal collections.
 
-**My Metabase is on a really old version.** Check the [compatibility band](#compatibility). Versions older than v0.45 are explicitly refused; v0.45–v0.55 will warn but try; v0.55–v0.62 are in our tested band; newer versions warn but proceed.
+Official collections are kept, but CI tests only the open-source edition.
 
-## Compatibility
+## Files
 
-| Metabase | Status |
-| --- | --- |
-| <v0.45 | **Refused** — collection API shape too different |
-| v0.45–v0.55 | Warns; proceed at your own risk |
-| v0.55–v0.62 | **Tested** in CI integration matrix |
-| >v0.62 | Warns; we want to hear about issues |
-| `latest` | Non-blocking CI job runs against it to surface upcoming breakage |
+```
+metabase-sync.yaml
+metabase-sync.state
+collections/
+  main/
+    sales.yaml
+    sales/
+      orders_by_date.yaml
+      q4_review.yaml
+      q4_review/
+        dashboard_question.yaml
+  snippets/
+    date_filter.yaml
+subscriptions/
+  q4_review.yaml
+```
 
-We pin `v0.62.2` for the blocking CI job; the matrix in `.github/workflows/ci.yml` runs the same integration suite against `v0.55`, `v0.58`, `v0.60`, and `latest` non-blockingly.
+- Each item is one YAML file named after it. Collections and dashboards have a folder of the same name for what they contain.
+- Collections, questions, dashboards, and snippets pass Metabase's own representation validator. Subscriptions are not part of that format and live in `subscriptions/`.
+- References between items use entity ids. Databases, tables, and fields are referenced by name, so the files apply to any instance with the same databases.
+- SQL is stored as a literal block, exactly as written.
+- Same-named siblings get a short id suffix, so paths never change because of an unrelated item.
+- `apply` only archives items listed in `metabase-sync.state`, so content created in Metabase since the last export is never touched.
+- A subscription takes its name and its cards from its dashboard, as Metabase does. `attachments` lists the dashcards sent as CSV or XLSX, by dashcard `entity_id`, with Metabase's `include_csv`, `include_xls`, `format_rows`, and `pivot_results` settings.
 
-Python: 3.11, 3.12, 3.13.
+## Writing new items by hand
 
-If something goes wrong, you can `cp -r` the backup over `state/` and re-apply to roll back.
+Create the file without an `entity_id`, then `plan` and `apply`:
 
-## Security
+```yaml
+name: Orders by date
+collection_id: HyocLue0f_iGHD90nRWrl
+display: line
+dataset_query:
+  database: Sample Database
+  lib/type: mbql/query
+  stages:
+    - lib/type: mbql.stage/native
+      native: |-
+        SELECT created_at::date AS day, count(*)
+        FROM orders
+        GROUP BY 1
+visualization_settings: {}
+serdes/meta:
+  - model: Card
+```
 
-- The API key is read from the environment (or an `.env` file). Anything that captures the environment — CI logs, shell history (`printenv`), error stack traces from third-party deps that `repr()` settings — can leak it. Tools like [sops](https://github.com/getsops/sops) + `sops exec-env encrypted.env 'metabase-sync apply'` work well.
-- HTTPS verification follows httpx's defaults (CA bundle from `certifi`). The tool does not disable cert verification.
-- `state/.plan.json` and `state/.last-apply.json` include full SQL bodies — they're written under `state/` and should be `.gitignore`d. The default `.gitignore` snippet:
-  ```
-  state/.plan.json
-  state/.last-apply.json
-  ```
-- The tool never serialises database connection credentials (`details` is stripped from `databases/<name>.yaml`).
+Write the fields Metabase's schemas require, such as a card's `visualization_settings` and a dashcard's `row` and `col`. `validate` names any that are missing or misspelt. `apply` writes the id Metabase assigns into the file. To reference a new item from another file before applying, run `metabase-sync fmt` first to give it an id.
 
-## Limitations
+## Importing existing items
 
-- `--delete` (opt-in archival of items absent from disk) is not yet implemented.
-- Permissions, users, and groups are out of scope.
-- Alerts, legacy metrics, and segments are not yet supported.
+A file for an item that exists in Metabase but not in `metabase-sync.state` plans as an import: `apply` records the item and applies any differences, instead of creating a duplicate. Files are matched by entity id, or without one by name and collection (a subscription by dashboard and channels). A file that matches several items, or that matches the same item as another file, stops as a conflict; set its `entity_id` to import one, or pass `--force` to create it.
+
+## Removing items
+
+Delete the file. `plan` shows an archive (or a delete with `removal: delete`). Removing a collection archives it once; Metabase archives its contents with it, and `plan` lists them. If a removed collection or dashboard holds items that are not in the files, `plan` stops with a conflict until you export them or pass `--force`. Remove a question's dashcards along with its file.
+
+## Safety
+
+- `apply` plans again after you approve, and applies a saved plan only if planning now gives the same result. If Metabase or the files changed in between, it stops before writing anything.
+- `apply` records each change and each new id in `.metabase-sync/journal.jsonl` before relying on it. If a run is interrupted, the next command finds what was created and finishes the rest.
+- If Metabase doesn't confirm a create, `apply` stops instead of sending it again. The next run checks for the item before creating it.
+- `export` replaces each file atomically and removes stale files last, so an interrupted export loses nothing. Run it again to finish.
+
+## Upgrading from 0.3
+
+Export into a new directory with `metabase-sync init --chdir new` and `metabase-sync export --chdir new`, then replace the old files.
+
+## CI
+
+[`examples/`](examples/) has GitHub Actions workflows for planning on pull requests, applying on merge, and nightly drift detection.
+
+## Out of scope
+
+Permissions, users, groups, alerts, segments, legacy metrics, and personal collections.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, running tests, and the release process.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
-
-## Disclaimer
-
-This is an unofficial, community-built tool. Not affiliated with or endorsed by Metabase, Inc. "Metabase" is a trademark of Metabase, Inc.
+MIT. This is an unofficial tool, not affiliated with Metabase, Inc.

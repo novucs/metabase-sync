@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "infrastructure/metabase/state/**"
+      - "metabase/**"
 
 # Prevent two apply runs racing each other.
 concurrency:
@@ -31,8 +31,8 @@ jobs:
         run: uv tool install metabase-sync
 
       - name: Apply
-        working-directory: infrastructure/metabase
+        working-directory: metabase
         env:
           METABASE_URL: ${{ secrets.METABASE_URL }}
           METABASE_API_KEY: ${{ secrets.METABASE_API_KEY }}
-        run: metabase-sync apply
+        run: metabase-sync apply --auto-approve

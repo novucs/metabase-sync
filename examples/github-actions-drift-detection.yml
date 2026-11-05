@@ -29,7 +29,7 @@ jobs:
         run: uv tool install metabase-sync
 
       - name: Export live state
-        working-directory: infrastructure/metabase
+        working-directory: metabase
         env:
           METABASE_URL: ${{ vars.METABASE_URL }}
           METABASE_API_KEY: ${{ secrets.METABASE_API_KEY }}

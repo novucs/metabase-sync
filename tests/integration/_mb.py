@@ -1,43 +1,37 @@
-"""`MetabaseAdmin` — a thin httpx wrapper over the Metabase REST API for test
-setup. Kills the per-call `httpx.get(f"{url}/api/...", headers=..., timeout=10)`
-boilerplate and names the server-side fixtures (create card, dashboard, pulse…)
-so tests read as intent, not transport.
-"""
-
 from __future__ import annotations
 
 from typing import Any
 
-import httpx
+import requests
 
 
 class MetabaseAdmin:
     def __init__(self, url: str, api_key: str, timeout: float = 30.0) -> None:
-        self._http = httpx.Client(
-            base_url=url.rstrip("/"),
-            headers={"X-API-Key": api_key},
-            timeout=timeout,
-        )
+        self._base = url.rstrip("/")
+        self._timeout = timeout
+        self._http = requests.Session()
+        self._http.headers["X-API-Key"] = api_key
 
     def close(self) -> None:
         self._http.close()
 
     # --- raw verbs ----------------------------------------------------------
 
-    def get(self, path: str) -> Any:
-        r = self._http.get(path)
+    def _call(self, method: str, path: str, **kwargs: Any) -> Any:
+        r = self._http.request(
+            method, self._base + path, timeout=self._timeout, **kwargs
+        )
         r.raise_for_status()
-        return r.json()
+        return r.json() if r.content else None
+
+    def get(self, path: str) -> Any:
+        return self._call("GET", path)
 
     def post(self, path: str, json: dict[str, Any]) -> Any:
-        r = self._http.post(path, json=json)
-        r.raise_for_status()
-        return r.json()
+        return self._call("POST", path, json=json)
 
     def put(self, path: str, json: dict[str, Any]) -> Any:
-        r = self._http.put(path, json=json)
-        r.raise_for_status()
-        return r.json()
+        return self._call("PUT", path, json=json)
 
     # --- databases ----------------------------------------------------------
 
@@ -144,7 +138,7 @@ class MetabaseAdmin:
 
     def run_card_query(self, card_id: int) -> None:
         # Populates result_metadata server-side. Ignore the result body.
-        self._http.post(f"/api/card/{card_id}/query", json={}).raise_for_status()
+        self._call("POST", f"/api/card/{card_id}/query", json={})
 
     # --- dashboards ---------------------------------------------------------
 
