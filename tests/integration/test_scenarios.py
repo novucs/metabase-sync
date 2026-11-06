@@ -165,6 +165,33 @@ def test_new_files_are_created_once_and_take_metabase_ids(client, mb, tmp_path):
     assert_clean(client, root)
 
 
+def test_a_nested_collection_can_be_managed_on_its_own(client, mb, tmp_path):
+    rich = build_rich(mb)
+    root = scope(tmp_path / "root", rich.child["entity_id"])
+    workflow.export(client, root)
+    local = read_tree(root)
+    card_path = path_of(root, rich.gui["entity_id"])
+    card = yamlio.read(card_path)
+    card["name"] = unique("Renamed")
+    yamlio.write(card_path, card)
+    yamlio.write(
+        card_path.with_name("answer.yaml"),
+        native_card(unique("Answer"), "SELECT 42", rich.child["entity_id"]),
+    )
+    workflow.fmt(root)
+
+    done = apply(client, root)
+
+    assert rich.collection["entity_id"] not in local.entities
+    assert rich.native["entity_id"] not in local.entities
+    assert sorted((action, kind) for action, kind, _ in done) == [
+        ("create", "card"),
+        ("update", "card"),
+    ]
+    assert mb.get_card(rich.gui["id"])["name"] == card["name"]
+    assert_clean(client, root)
+
+
 def test_removing_a_card_and_its_dashcard_together(client, mb, tmp_path):
     rich, root = exported(client, mb, tmp_path)
     path_of(root, rich.gui["entity_id"]).unlink()
