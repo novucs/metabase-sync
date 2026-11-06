@@ -19,7 +19,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 from rich.logging import RichHandler
@@ -90,6 +90,17 @@ def _client_from_settings(s):
     )
 
 
+def _collection_option() -> Any:
+    return typer.Option(
+        None,
+        "--collection",
+        "-c",
+        envvar="METABASE_COLLECTION",
+        help="Limit to one top-level collection (entity_id or name) and its subtree. "
+        "Sticky: saved to state/.metabase-sync-scope by export and apply.",
+    )
+
+
 def _parse_only(only: Optional[str]) -> Optional[set[str]]:
     return {x.strip() for x in only.split(",")} if only else None
 
@@ -104,13 +115,18 @@ def _is_interactive() -> bool:
 @app.command()
 def export(
     state_dir: Optional[Path] = typer.Option(None, "--state-dir", "-s"),
+    collection: Optional[str] = _collection_option(),
 ) -> None:
-    """Pull everything from Metabase into the on-disk state tree."""
+    """Pull everything (or one collection subtree) into the on-disk state tree."""
     from metabase_sync.export import run_export
+    from metabase_sync.scope import open_scope, write_scope
 
     s = load_settings(state_dir=state_dir)
     with _client_from_settings(s) as client:
-        run_export(client, s.state_dir)
+        scoped, target = open_scope(client, s.state_dir, collection, export=True)
+        run_export(scoped, s.state_dir)
+    if target:
+        write_scope(s.state_dir, target["entity_id"])
 
 
 @app.command()
@@ -121,6 +137,7 @@ def plan(
         "--only",
         help="Comma-separated subset of: collections,snippets,cards,dashboards,pulses",
     ),
+    collection: Optional[str] = _collection_option(),
 ) -> None:
     """Compute the diff between state/ and the live instance. Does not write.
 
@@ -129,10 +146,12 @@ def plan(
     """
     from metabase_sync.apply import run
     from metabase_sync.plan import render_report
+    from metabase_sync.scope import open_scope
 
     s = load_settings(state_dir=state_dir)
     with _client_from_settings(s) as client:
-        p = run(client, s.state_dir, mode="plan", only=_parse_only(only))
+        scoped, _ = open_scope(client, s.state_dir, collection, export=False)
+        p = run(scoped, s.state_dir, mode="plan", only=_parse_only(only))
 
     typer.echo(render_report(p, s.state_dir))
     plan_path = s.state_dir / ".plan.json"
@@ -180,6 +199,7 @@ def apply(
         help="Run a fresh export to this path before applying. "
         "If apply trashes something, restore via `--state-dir <backup>`.",
     ),
+    collection: Optional[str] = _collection_option(),
 ) -> None:
     """Push the state tree to Metabase. Re-derives the diff at execution time."""
     if delete:
@@ -192,11 +212,20 @@ def apply(
 
     from metabase_sync.apply import run
     from metabase_sync.plan import render_report
+    from metabase_sync.scope import (
+        ScopedClient,
+        open_scope,
+        saved_entity_id,
+        write_scope,
+    )
 
     s = load_settings(state_dir=state_dir)
     only_set = _parse_only(only)
 
     with _client_from_settings(s) as client:
+        client, target = open_scope(client, s.state_dir, collection, export=False)
+        if target:
+            write_scope(s.state_dir, target["entity_id"])
         # Plan first so the user sees what will happen.
         preview = run(client, s.state_dir, mode="plan", only=only_set)
         typer.echo(render_report(preview, s.state_dir))
@@ -226,6 +255,10 @@ def apply(
             allow_missing_recipients=allow_missing_recipients,
             concurrency_snapshot=preview.concurrency_snapshot,
         )
+
+    # First scoped apply created the collection: pin the scope to its entity_id.
+    if isinstance(client, ScopedClient) and (eid := saved_entity_id(s.state_dir)):
+        write_scope(s.state_dir, eid)
 
     # Write audit log so post-mortems aren't reliant on terminal scrollback.
     last_apply_path = s.state_dir / ".last-apply.json"

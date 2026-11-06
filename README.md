@@ -72,9 +72,28 @@ metabase-sync apply         # write changes
 | `metabase-sync plan` | Read-only diff. Prints a per-item report and writes `state/.plan.json`. |
 | `metabase-sync apply` | Re-derives the diff and executes it. Idempotent. |
 | `metabase-sync apply --only cards` | Restrict to one resource (`collections,snippets,cards,dashboards,pulses`). |
+| `metabase-sync export --collection <entity_id\|name>` | Scope to one top-level collection and its subtree (see below). |
 | `metabase-sync index` | Debug: print remote resource counts. |
 
 Both `plan` and `apply` re-fetch the live instance, so you can't apply a stale plan against a moved instance.
+
+## Scoping to one collection
+
+One repo per team or project, each owning one top-level collection:
+
+```bash
+metabase-sync export --collection "Finance Reporting"   # or its entity_id; env: METABASE_COLLECTION
+metabase-sync plan                                      # scope is remembered
+metabase-sync apply
+```
+
+- Only that collection, its subfolders at any depth, their cards and dashboards, and subscriptions on those dashboards are read or written. Root-level items, other collections, and snippets are never touched.
+- Per-item detail fetches are limited to the subtree, so large instances load much faster.
+- The scope is sticky: `export` and `apply` save the collection's entity_id to `state/.metabase-sync-scope`. Commit it. Later runs use it without the flag; a different `--collection` on the same state dir is refused.
+- Names are only used to find the collection the first time, among top-level collections (a duplicate top-level name is refused; pass the entity_id). Subfolder names may repeat anywhere.
+- Renaming is safe: change `name:` in the root `_collection.yaml` (or in the UI) and the scope still matches by entity_id.
+- New collection: create `state/collections/<slug>/_collection.yaml` and run `apply --collection "<name>"`; it is created at the top level and the scope is pinned to its new entity_id.
+- A scoped state dir must hold exactly one top-level collection.
 
 ## Authoring new cards and dashboards in code
 

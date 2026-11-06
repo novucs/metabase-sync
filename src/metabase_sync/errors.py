@@ -27,6 +27,11 @@ class MissingRecipientError(MetabaseSyncError):
     Pass `--allow-missing-recipients` to silently drop them."""
 
 
+class ScopeError(MetabaseSyncError):
+    """`--collection` could not be resolved, conflicts with the scope saved in
+    state/, or state/ holds collections outside the scope."""
+
+
 class ReferenceResolutionError(MetabaseSyncError):
     """A dashcard's `card_path` doesn't resolve to a card on disk during
     apply. Only fires if the reference preflight is bypassed or new files

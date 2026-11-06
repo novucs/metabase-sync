@@ -107,9 +107,16 @@ class MetabaseClient:
     # --- resource shortcuts ---------------------------------------------------
 
     def list_collections(self) -> list[dict[str, Any]]:
-        return self.get(
+        cols = self.get(
             "/api/collection", archived=False, exclude_other_user_collections=True
         )
+        # Metabase <= v0.55 omits parent_id from the list; derive it from location.
+        for c in cols:
+            if c.get("parent_id") is None and isinstance(c.get("location"), str):
+                ids = [p for p in c["location"].split("/") if p.isdigit()]
+                if ids:
+                    c["parent_id"] = int(ids[-1])
+        return cols
 
     def get_collection(self, cid: int | str) -> dict[str, Any]:
         return self.get(f"/api/collection/{cid}")

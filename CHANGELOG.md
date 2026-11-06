@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`--collection <entity_id|name>` scopes export, plan, and apply to one
+  top-level collection subtree** (env: `METABASE_COLLECTION`). Only that
+  collection, its subfolders, their cards and dashboards, and subscriptions on
+  those dashboards are listed, fetched, and written, which cuts per-item detail
+  calls on large instances and limits the blast radius of an apply. The scope
+  is sticky: `export` and `apply` save the entity_id to
+  `state/.metabase-sync-scope`; later runs use it, a conflicting
+  `--collection` is refused, and renames are safe. Names resolve only among
+  top-level collections (duplicates refused). A first scoped `apply` creates
+  the collection and pins the scope.
+
+### Fixed
+
+- **Nested collections keep their place on Metabase <= v0.55.** Those
+  versions omit `parent_id` from the collection list, so export wrote every
+  nested collection as a top-level folder. The client now derives `parent_id`
+  from `location`. On those versions, re-export after upgrading: a plan
+  against old flattened state shows `parent_id` updates that would move the
+  collections to the top level.
+
+### Testing
+
+- Unit coverage for resolution, subtree filtering, and the scope guards
+  (`test_scope.py`); integration coverage for scoped export/plan/apply,
+  isolation from other collections, rescope refusal, and first-apply creation
+  (`tests/integration/test_scope.py`).
+- Unit coverage for deriving `parent_id` from `location`
+  (`test_collection_parent.py`).
+
 ## [0.3.1] - 2026-10-27
 
 ### Fixed
