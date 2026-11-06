@@ -352,4 +352,5 @@ def main() -> None:
         app()
     except MetabaseSyncError as exc:
         typer.secho(f"{exc}", err=True)
-        raise typer.Exit(code=1) from None
+        # typer.Exit is only handled inside app(); out here it would print a traceback.
+        sys.exit(1)

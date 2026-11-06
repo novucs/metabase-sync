@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Errors exit 1 with a one-line message instead of a traceback.** `main()`
+  raised `typer.Exit` outside the Typer app, so every `MetabaseSyncError`
+  (preflight failure, concurrency drift, ...) printed its message followed by
+  an uncaught-exception traceback. It now exits via `sys.exit(1)`.
+
+### Testing
+
+- Unit coverage that `main()` exits 1 on a `MetabaseSyncError`
+  (`test_cli_main.py`).
+
 ## [0.3.1] - 2026-10-27
 
 ### Fixed
