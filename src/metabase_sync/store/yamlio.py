@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from yaml.emitter import ScalarAnalysis
 
 _Loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
@@ -16,6 +17,18 @@ class _Dumper(yaml.SafeDumper):
 
     def increase_indent(self, flow: bool = False, indentless: bool = False) -> None:
         super().increase_indent(flow, False)
+
+    def analyze_scalar(self, scalar: str) -> ScalarAnalysis:
+        analysis = super().analyze_scalar(scalar)
+        lines = scalar.split("\n")
+        if len(lines) > 1 and all(line.strip(" \t") or not line for line in lines):
+            tidy = "\n".join(line.rstrip(" \t") for line in lines).replace("\t", " ")
+            analysis.allow_block = super().analyze_scalar(tidy).allow_block
+        return analysis
+
+    def determine_block_hints(self, text: str) -> str:
+        hints = super().determine_block_hints(text)
+        return f"{self.best_indent}{hints}" if text.startswith("\t") else hints
 
 
 def _represent_str(dumper: yaml.SafeDumper, value: str) -> yaml.ScalarNode:

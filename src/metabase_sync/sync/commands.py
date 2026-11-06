@@ -108,6 +108,7 @@ class ExportResult:
     kept: list[str]
     conflicts: list[Drift]
     warnings: list[str]
+    broken: list[str]
 
     @property
     def clean(self) -> bool:
@@ -211,6 +212,7 @@ def export(
         kept=unapplied,
         conflicts=conflicts,
         warnings=list(dict.fromkeys(remote.index.warnings)),
+        broken=remote.index.broken,
     )
 
 
@@ -365,7 +367,8 @@ class Status:
     interrupted: bool
     report: Report
     plan: Plan | None = None
-    duplicates: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    broken: list[str] = field(default_factory=list)
 
 
 def status(client: MetabaseClient, root: Path) -> Status:
@@ -388,7 +391,9 @@ def status(client: MetabaseClient, root: Path) -> Status:
     for (kind, _, _), items in groups.items():
         if len(items) > 1 and kind != SUBSCRIPTION:
             names = sorted({i.name for i in items})
-            result.duplicates.append(
+            result.warnings.append(
                 f"{len(items)} {kind}s named {names[0]!r} share a collection in Metabase"
             )
+    result.warnings += remote.index.warnings
+    result.broken = remote.index.broken
     return result

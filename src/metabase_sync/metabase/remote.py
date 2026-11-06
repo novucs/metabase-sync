@@ -12,7 +12,7 @@ from metabase_sync.errors import (
 )
 from metabase_sync.format.representations import Item
 from metabase_sync.metabase.client import MetabaseClient
-from metabase_sync.metabase.index import Index, RemoteItem, with_detail
+from metabase_sync.metabase.index import UNRESOLVED, Index, RemoteItem, with_detail
 
 
 @dataclass
@@ -44,8 +44,10 @@ class Remote:
 
     def read(self, kind: str, raw: dict[str, Any]) -> Item:
         resource = self.api.RESOURCES[kind]
+        unresolved: set[tuple[str, Any]] = set()
+        token = UNRESOLVED.set(unresolved)
         try:
-            return resource.read(
+            item = resource.read(
                 resource.Response.model_validate(raw, extra="ignore"), self.index
             )
         except ValidationError as error:
@@ -60,3 +62,18 @@ class Remote:
                 f"Metabase: {error}",
                 hint=error.hint,
             ) from error
+        finally:
+            UNRESOLVED.reset(token)
+        if unresolved:
+            grouped: dict[str, list[Any]] = {}
+            for what, value in sorted(unresolved):
+                grouped.setdefault(what, []).append(value)
+            refs = " and ".join(
+                f"{what}{'' if len(ids) == 1 else 's'} {', '.join(map(str, ids))}"
+                for what, ids in grouped.items()
+            )
+            self.index.broken.append(
+                f"{kind} {raw.get('name')!r} refers to {refs}, which Metabase "
+                "doesn't have"
+            )
+        return item

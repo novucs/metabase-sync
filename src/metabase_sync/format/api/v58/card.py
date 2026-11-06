@@ -74,7 +74,7 @@ class Request(BaseModel):
 
 def read(response: Response, ids: Index) -> Card:
     database = (
-        ids.lenient(ids.database_name, response.database_id, "database id")
+        ids.lenient(ids.database_name, response.database_id, "database")
         if response.database_id is not None
         else None
     )
@@ -122,7 +122,7 @@ def read_column(column: Column, ids: Index) -> ResultColumn:
         effective_type=column.effective_type,
         field_ref=portable(column.field_ref, ids),
         fk_target_field_id=(
-            ids.lenient(ids.metadata.field_ref, column.fk_target_field_id, "field id")
+            ids.lenient(ids.metadata.field_ref, column.fk_target_field_id, "field")
             if column.fk_target_field_id is not None
             else None
         ),

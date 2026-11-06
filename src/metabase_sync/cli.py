@@ -1,12 +1,15 @@
 import logging
 import sys
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.highlighter import NullHighlighter
+from rich.logging import RichHandler
 from rich.markup import escape
 from rich.text import Text
 
@@ -105,10 +108,17 @@ PRECEDENCE = (CREATE, RESTORE, IMPORT, UPDATE, DELETE, ARCHIVE)
 def _start(root: Path | None, verbose: bool, debug: bool) -> Path:
     options.verbose |= verbose
     options.debug |= debug
+    handler = RichHandler(
+        console=err,
+        show_time=False,
+        show_level=False,
+        show_path=False,
+        highlighter=NullHighlighter(),
+    )
     if options.verbose:
-        logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
+        handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+        logging.basicConfig(level=logging.INFO, handlers=[handler])
     else:
-        handler = logging.StreamHandler()
         handler.setFormatter(logging.Formatter("warning: %(message)s"))
         logger = logging.getLogger("metabase_sync")
         logger.addHandler(handler)
@@ -305,9 +315,19 @@ def _print_error(error: MetabaseSyncError) -> None:
         err.print(f"[dim]hint: {escape(error.hint)}[/dim]")
 
 
-def _print_warnings(warnings: list[str]) -> None:
-    for warning in dict.fromkeys(warnings):
-        err.print(f"[yellow]warning:[/yellow] {escape(warning)}")
+def _print_warnings(
+    warnings: list[str], broken: Sequence[str] = (), console: Console = err
+) -> None:
+    broken = list(dict.fromkeys(broken))
+    if len(broken) > 1 and not options.verbose:
+        summary = (
+            f"{len(broken)} items refer to tables, fields, or other items that "
+            "Metabase doesn't have; their files keep the numeric ids. Pass --verbose "
+            "to list them."
+        )
+        broken = [summary]
+    for warning in dict.fromkeys([*warnings, *broken]):
+        console.print(f"[yellow]warning:[/yellow] {escape(warning)}")
 
 
 def _print_notes(notes: list[str]) -> None:
@@ -373,7 +393,7 @@ def export(
     root = _start(root, verbose, debug)
     with _client(root) as client, err.status("Exporting from Metabase"):
         result = workflow.export(client, root, check=check, force=force)
-    _print_warnings(result.warnings)
+    _print_warnings(result.warnings, result.broken)
     if result.conflicts:
         _print_conflicts(
             result.conflicts, {}, "between your edits and changes made in Metabase:"
@@ -456,7 +476,10 @@ def plan(
     with _client(root) as client, err.status("Planning"):
         prepared, result = workflow.plan(client, root, force)
     _print_notes(prepared.notes)
-    _print_warnings(prepared.report.warnings + prepared.remote.index.warnings)
+    _print_warnings(
+        prepared.report.warnings + prepared.remote.index.warnings,
+        prepared.remote.index.broken,
+    )
     if as_json:
         out.print_json(result.model_dump_json())
     else:
@@ -511,7 +534,10 @@ def apply(
         with err.status("Planning"):
             prepared, result = workflow.plan_apply(client, root, plan_file, force)
         _print_notes(prepared.notes)
-        _print_warnings(prepared.report.warnings + prepared.remote.index.warnings)
+        _print_warnings(
+            prepared.report.warnings + prepared.remote.index.warnings,
+            prepared.remote.index.broken,
+        )
         if plan_file is None or result.empty:
             _print_plan(result)
         if plan_file is None and not result.empty:
@@ -543,8 +569,7 @@ def status(root: Root = None, verbose: Verbose = False, debug: Debug = False) ->
         )
     for error in result.report.errors:
         out.print(f"[red]error:[/red] {escape(error)}")
-    for warning in [*result.report.warnings, *result.duplicates]:
-        out.print(f"[yellow]warning:[/yellow] {escape(warning)}")
+    _print_warnings(result.report.warnings + result.warnings, result.broken, out)
     current = result.plan
     if current is None:
         raise typer.Exit(1)

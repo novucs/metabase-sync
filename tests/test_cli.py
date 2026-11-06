@@ -42,3 +42,28 @@ def test_ctrl_c_exits_130_and_says_so(tmp_path, monkeypatch, capsys):
 
     assert code == 130
     assert "Interrupted." in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+def test_items_with_missing_references_are_summarised_unless_verbose(
+    tmp_path, monkeypatch, capsys, verbose
+):
+    yamlio.write(tmp_path / tree.CONFIG, {})
+    monkeypatch.setenv("METABASE_URL", "http://mb.test")
+    monkeypatch.setenv("METABASE_API_KEY", "k")
+    broken = ["card 'A' refers to 1 table", "card 'B' refers to 2 fields"]
+    result = workflow.ExportResult(
+        files=tree.Changes([], [], [], []),
+        kept=[],
+        conflicts=[],
+        warnings=[],
+        broken=broken + broken,
+    )
+    monkeypatch.setattr(workflow, "export", lambda *args, **kwargs: result)
+
+    run(monkeypatch, "export", "--chdir", str(tmp_path), *["-v"] * verbose)
+
+    printed = capsys.readouterr().err
+    assert ("card 'A'" in printed) is verbose
+    assert ("2 items refer to" in printed) is not verbose
+    assert printed.count("warning:") == 2 - (not verbose)

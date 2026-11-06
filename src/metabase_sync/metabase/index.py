@@ -1,3 +1,4 @@
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -13,6 +14,8 @@ from metabase_sync.format.representations import (
 )
 from metabase_sync.metabase.client import MetabaseClient
 from metabase_sync.metabase.metadata import Metadata
+
+UNRESOLVED: ContextVar[set[tuple[str, Any]]] = ContextVar("unresolved")
 
 
 def location_ids(location: str | None) -> list[int]:
@@ -95,6 +98,7 @@ class Index:
     users: dict[int, str] = field(default_factory=dict)
     timelines: list[RemoteItem] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    broken: list[str] = field(default_factory=list)
     _by_eid: dict[str, tuple[str, int]] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -191,8 +195,8 @@ class Index:
     def lenient(self, call: Any, value: Any, what: str) -> Any:
         try:
             return call(value)
-        except UnresolvedReferenceError as error:
-            self.warnings.append(f"kept numeric {what} {value}: {error}")
+        except UnresolvedReferenceError:
+            UNRESOLVED.get().add((what, value))
             return value
 
 

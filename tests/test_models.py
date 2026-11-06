@@ -291,7 +291,7 @@ def test_a_link_to_a_deleted_database_is_kept_with_a_warning():
     assert isinstance(dashboard, Dashboard)
     link = dashboard.dashcards[0].visualization_settings["link"]
     assert link["entity"]["id"] == 2
-    assert found.warnings
+    assert found.broken
 
 
 def test_an_unreadable_reference_names_the_item_it_is_in():
@@ -333,7 +333,32 @@ def test_a_card_on_a_database_metabase_does_not_list_reads_with_a_warning():
     card = Remote(index=found, api=v58).read(CARD, raw)
 
     assert isinstance(card, Card) and card.database_id is None
-    assert found.warnings
+    assert found.broken == [
+        "card 'Audit' refers to database 13371337, which Metabase doesn't have"
+    ]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT a, \nFROM t\n",
+        "SELECT\n\ta\nFROM t",
+        "SELECT a\nFROM t  ",
+        "\tSELECT a\nFROM t",
+    ],
+)
+def test_sql_with_tabs_or_trailing_spaces_is_written_as_a_block(sql: str):
+    text = yamlio.dumps({"native": sql})
+
+    assert text.startswith("native: |")
+    assert yamlio.loads(text) == {"native": sql}
+
+
+@pytest.mark.parametrize(
+    "sql", ["SELECT a\n  \nFROM t", "\tSELECT a\n\nFROM t\n", " SELECT\n\tb \n\t\n"]
+)
+def test_whitespace_only_lines_survive_a_round_trip(sql: str):
+    assert yamlio.loads(yamlio.dumps({"native": sql})) == {"native": sql}
 
 
 def test_an_untabbed_dashcard_on_a_dashboard_with_tabs_reads():
@@ -579,4 +604,4 @@ def test_a_model_column_targeting_a_deactivated_field_keeps_its_id_with_a_warnin
 
     assert isinstance(card, Card) and card.result_metadata is not None
     assert card.result_metadata[0].fk_target_field_id == 7
-    assert found.warnings
+    assert found.broken

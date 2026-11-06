@@ -405,7 +405,9 @@ def test_a_reference_to_a_field_that_no_longer_exists_is_kept(client, mb, tmp_pa
 
     result = workflow.export(client, root)
 
-    assert any("999999" in w for w in result.warnings)
+    assert any(
+        f"{rich.native['name']!r} refers to field 999999," in w for w in result.broken
+    )
     assert_clean(client, root)
 
 
