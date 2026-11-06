@@ -1,6 +1,6 @@
 [project]
 name = "metabase-sync"
-version = "0.4.0"
+version = "0.4.1"
 description = "Metabase as code: export, plan, and apply collections, questions, dashboards, snippets, and subscriptions in the metabase/representations format, using the Metabase REST API."
 readme = { file = "README.md", content-type = "text/markdown" }
 authors = [{ name = "novucs" }]
