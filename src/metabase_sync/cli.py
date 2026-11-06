@@ -15,6 +15,7 @@ from rich.text import Text
 
 from metabase_sync import __version__
 from metabase_sync.errors import (
+    BlockedError,
     ConfigError,
     ConflictError,
     MetabaseSyncError,
@@ -230,6 +231,14 @@ def _print_diff(diff: str) -> None:
 
 
 def _print_unmanaged(plan: Plan) -> None:
+    if plan.kept:
+        out.print("\nKept, though only in Metabase:")
+        for kept in plan.kept:
+            line = Text(f"  {kept.kind} {kept.name!r}")
+            line.append(f"  {kept.reason}", style="dim")
+            out.print(line)
+    if not plan.unmanaged:
+        return
     n = len(plan.unmanaged)
     out.print(
         f"[dim]{count(n, 'item')} {_agree(n, 'exists', 'exist')} only in Metabase "
@@ -280,6 +289,8 @@ def _print_plan(plan: Plan) -> None:
                 _print_diff(plan.diffs[entry.entity_id])
     if plan.conflicts and not plan.force:
         _print_conflicts(plan.conflicts, plan.diffs)
+    if plan.blocked:
+        _print_blocked(plan.blocked)
     if plan.cascaded:
         n = len(plan.cascaded)
         out.print(
@@ -288,8 +299,15 @@ def _print_plan(plan: Plan) -> None:
         )
         for ref in plan.cascaded:
             out.print(Text(f"  - {ref.kind} {ref.name!r}", style="dim"))
-    if plan.unmanaged:
+    if plan.unmanaged or plan.kept:
         _print_unmanaged(plan)
+
+
+def _print_blocked(blocked: list[Drift]) -> None:
+    n = len(blocked)
+    out.print(f"\n{count(n, 'removal')} can't be applied, even with --force:")
+    for entry in blocked:
+        out.print(_entry_line("!", "bold red", entry))
 
 
 def _print_conflicts(
@@ -525,6 +543,9 @@ def plan(
         err.print(
             f"Saved to {out_file}; run `metabase-sync apply {out_file}`.", markup=False
         )
+    if result.blocked:
+        _print_error(BlockedError(result.blocked))
+        raise typer.Exit(1)
     if result.conflicts and not force:
         _print_error(ConflictError(result.conflicts, len(result.drift)))
         raise typer.Exit(1)
@@ -620,11 +641,14 @@ def status(root: Root = None, verbose: Verbose = False, debug: Debug = False) ->
             out.print(_entry_line("~", "cyan", entry))
     if current.conflicts:
         _print_conflicts(current.conflicts, {})
-    if not (items or current.drift or current.conflicts or result.report.errors):
+    if current.blocked:
+        _print_blocked(current.blocked)
+    problems = current.conflicts or current.blocked or result.report.errors
+    if not (items or current.drift or problems):
         out.print("[green]Files match Metabase.[/green]")
-    if current.unmanaged:
+    if current.unmanaged or current.kept:
         _print_unmanaged(current)
-    if result.report.errors or current.conflicts:
+    if problems:
         raise typer.Exit(1)
 
 
@@ -640,6 +664,10 @@ def main() -> None:
             case typer.TyperException():
                 err.print(f"[red]error:[/red] {escape(error.format_message())}")
                 err.print("[dim]hint: run `metabase-sync --help` for usage[/dim]")
+            case BlockedError():
+                _print_blocked(error.blocked)
+                err.print()
+                _print_error(error)
             case ConflictError():
                 _print_conflicts(error.conflicts, {})
                 err.print()

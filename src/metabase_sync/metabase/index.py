@@ -83,7 +83,10 @@ class RemoteItem(BaseModel):
 
 
 def rows(listing: Any) -> list[dict[str, Any]]:
-    found = listing["data"] if isinstance(listing, dict) else listing
+    if isinstance(listing, dict):
+        found = listing["data"] if "data" in listing else listing["items"]
+    else:
+        found = listing
     return [row for row in found if isinstance(row.get("id"), int)]
 
 
@@ -97,6 +100,7 @@ class Index:
     databases: dict[str, list[int]] = field(default_factory=dict)
     users: dict[int, str] = field(default_factory=dict)
     timelines: list[RemoteItem] = field(default_factory=list)
+    documents: list[RemoteItem] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     broken: list[str] = field(default_factory=list)
     snippets: bool = True
@@ -228,6 +232,7 @@ LISTINGS: dict[str, tuple[str, dict[str, str]]] = {
     "users": ("/api/user", {"status": "all"}),
     "timelines": ("/api/timeline", {}),
     "archived timelines": ("/api/timeline", {"archived": "true"}),
+    "documents": ("/api/document", {}),
 }
 
 
@@ -262,6 +267,9 @@ def fetch_index(
         timelines=[
             RemoteItem.model_validate(row, extra="ignore")
             for row in raw["timelines"] + raw["archived timelines"]
+        ],
+        documents=[
+            RemoteItem.model_validate(row, extra="ignore") for row in raw["documents"]
         ],
         snippets=snippets,
     )

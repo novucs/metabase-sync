@@ -16,13 +16,13 @@ from metabase_sync.format.representations.card import Card
 from metabase_sync.format.representations.dashboard import Dashboard, Dashcard
 from metabase_sync.format.representations.subscription import Subscription
 from metabase_sync.metabase.client import MetabaseClient
-from metabase_sync.metabase.index import Index
+from metabase_sync.metabase.index import Index, RemoteItem
 from metabase_sync.metabase.metadata import Metadata
 from metabase_sync.metabase.remote import Remote
 from metabase_sync.settings import Settings
 from metabase_sync.store import yamlio
 from metabase_sync.store.journal import Journal, Posting, Started
-from metabase_sync.store.state import Managed
+from metabase_sync.store.state import STATE, Managed
 from metabase_sync.store.tree import CONFIG, Entity, LocalTree, render, write_tree
 from metabase_sync.sync import commands as workflow
 from metabase_sync.sync.apply import reconcile
@@ -157,6 +157,596 @@ def test_items_never_seen_by_the_tool_are_left_alone():
     local = local_from(index, [(COLLECTION, 1)], {eid("a")})
 
     plan = plan_for(index, local)
+
+    assert plan.empty
+    assert [u.entity_id for u in plan.unmanaged] == [eid("c")]
+
+
+@pytest.mark.parametrize("mode", ["archive", "delete"])
+def test_unmanaged_items_are_removed_when_configured(mode):
+    index = remote(collection=[collection(1, "a")], card=[card(10, "c", 1)])
+    local = local_from(index, [(COLLECTION, 1)], {eid("a")})
+
+    plan = build_plan(local, connected(index), unmanaged=mode)
+
+    assert [(op.action, op.entity_id, op.reason) for op in plan.operations] == [
+        (mode, eid("c"), "only in Metabase")
+    ]
+    assert plan.unmanaged == []
+
+
+def test_an_unmanaged_collection_is_archived_once_with_its_contents():
+    index = remote(
+        collection=[collection(1, "a"), collection(2, "b", "/1/")],
+        card=[card(10, "c", 2)],
+    )
+    local = local_from(index, [(COLLECTION, 1)], {eid("a")})
+
+    plan = build_plan(local, connected(index), unmanaged="archive")
+
+    assert [(op.action, op.entity_id) for op in plan.operations] == [
+        ("archive", eid("b"))
+    ]
+    assert [c.entity_id for c in plan.cascaded] == [eid("c")]
+
+
+@pytest.mark.parametrize("moved", [False, True])
+def test_a_metabase_collection_holding_a_managed_item_goes_once_it_is_moved_out(
+    moved,
+):
+    index = remote(
+        collection=[collection(1, "a"), collection(2, "b", "/1/")],
+        card=[card(10, "c", 2)],
+    )
+    local = local_from(index, [(COLLECTION, 1), (CARD, 10)], {eid("a"), eid("c")})
+    if moved:
+        edit(local, "c", collection_id=eid("a"))
+
+    plan = build_plan(local, connected(index), unmanaged="archive")
+
+    actions = {(op.action, op.entity_id) for op in plan.operations}
+    if moved:
+        assert actions == {("update", eid("c")), ("archive", eid("b"))}
+    else:
+        assert actions == set()
+        assert [(k.entity_id, k.reason) for k in plan.kept] == [
+            (eid("b"), f"used by {eid('c')}.yaml")
+        ]
+
+
+def test_metabase_only_items_a_document_uses_are_kept():
+    index = remote(
+        collection=[collection(1, "a")],
+        card=[
+            card(11, "m", 1),
+            card(12, "s", 1),
+            card(
+                10,
+                "d",
+                1,
+                document_id=5,
+                dataset_query={
+                    "lib/type": "mbql/query",
+                    "database": 1,
+                    "stages": [{"lib/type": "mbql.stage/mbql", "source-card": 11}],
+                },
+            ),
+        ],
+    )
+    local = local_from(index, [(COLLECTION, 1)], {eid("a")})
+
+    plan = build_plan(local, connected(index), unmanaged="delete")
+
+    assert [(op.action, op.entity_id) for op in plan.operations] == [
+        ("delete", eid("s"))
+    ]
+    assert [(k.entity_id, k.reason) for k in plan.kept] == [
+        (eid("m"), "used by card 'card d'")
+    ]
+    assert [u.entity_id for u in plan.unmanaged] == [eid("d")]
+
+
+def test_a_metabase_collection_is_kept_when_its_managed_dashboard_cannot_be_deleted():
+    index = board_with_slack_subscription()
+    index.add(COLLECTION, collection(2, "t", "/1/"))
+    index.add(DASHBOARD, {**index.raw[DASHBOARD, 20], "collection_id": 2})
+    local = local_from(index, [(COLLECTION, 1)], {eid("a"), eid("b")})
+
+    plan = build_plan(
+        local, connected(index), removal="delete", unmanaged="archive", force=True
+    )
+
+    assert not [op for op in plan.operations if op.entity_id == eid("t")]
+    assert eid("b") in [c.entity_id for c in plan.blocked]
+    assert eid("t") in [k.entity_id for k in plan.kept]
+
+
+def test_items_a_managed_item_uses_in_metabase_are_kept():
+    index = remote(
+        collection=[collection(1, "a")],
+        card=[card(11, "y", 1)],
+        dashboard=[
+            {
+                "id": 20,
+                "entity_id": eid("b"),
+                "name": "board",
+                "collection_id": 1,
+                "dashcards": [
+                    {
+                        "id": 1,
+                        "entity_id": eid("x"),
+                        "card_id": 11,
+                        "row": 0,
+                        "col": 0,
+                        "size_x": 4,
+                        "size_y": 4,
+                    }
+                ],
+                "updated_at": "2026-01-01",
+            }
+        ],
+    )
+    local = local_from(index, [(COLLECTION, 1), (DASHBOARD, 20)], {eid("a"), eid("b")})
+    edit(local, "b", dashcards=[])
+    local.state[eid("b")] = Managed("dashboard", local_hash(local.entities[eid("b")]))
+
+    plan = build_plan(local, connected(index), unmanaged="delete")
+
+    assert eid("b") in [d.entity_id for d in plan.drift]
+
+    assert eid("y") not in [op.entity_id for op in plan.operations]
+    assert (eid("y"), "used by dashboard 'board'") in [
+        (k.entity_id, k.reason) for k in plan.kept
+    ]
+
+
+def test_trashed_items_do_not_stop_deleting_a_metabase_collection():
+    index = remote(
+        collection=[collection(1, "a"), collection(2, "s", "/1/")],
+        card=[
+            card(10, "c", 2),
+            card(11, "z", 2, archived=True, archived_directly=True),
+        ],
+    )
+    local = local_from(index, [(COLLECTION, 1)], {eid("a")})
+
+    plan = build_plan(local, connected(index), unmanaged="delete")
+
+    assert not plan.conflicts
+    assert {(op.action, op.entity_id) for op in plan.operations} == {
+        ("delete", eid("s")),
+        ("delete", eid("c")),
+    }
+
+
+def test_forcing_never_archives_a_kept_item_with_its_collection():
+    index = remote(
+        collection=[collection(1, "a"), collection(2, "m", "/1/")],
+        card=[card(10, "x", 2)],
+    )
+    local = local_from(index, [(COLLECTION, 1)], {eid("a"), eid("m")})
+    entity = new_card_in(
+        eid("a"), {"lib/type": "mbql.stage/mbql", "source-card": eid("x")}
+    )
+    local.entities[eid("n")] = entity
+
+    plan = build_plan(local, connected(index), unmanaged="archive", force=True)
+
+    assert eid("m") not in [op.entity_id for op in plan.operations]
+    assert [(c.entity_id, c.change) for c in plan.blocked] == [
+        (eid("m"), "removed here, but holds card 'card x'")
+    ]
+    assert eid("x") in [k.entity_id for k in plan.kept]
+    assert eid("x") not in [c.entity_id for c in plan.cascaded]
+
+
+def new_card_in(collection_eid: str, stage: dict[str, Any] | None = None) -> Entity:
+    data = {
+        "name": "New",
+        "entity_id": eid("n"),
+        "collection_id": collection_eid,
+        "display": "table",
+        "dataset_query": {
+            "lib/type": "mbql/query",
+            "database": "Warehouse",
+            "stages": [
+                stage or {"lib/type": "mbql.stage/native", "native": "SELECT 1"}
+            ],
+        },
+        "visualization_settings": {},
+    }
+    return Entity(
+        kind=CARD, data=representations.read(data, CARD, "test"), path=Path("n.yaml")
+    )
+
+
+def test_unmanaged_items_the_files_use_are_kept():
+    index = remote(
+        collection=[
+            collection(1, "a"),
+            collection(2, "e", "/1/"),
+            collection(3, "b", "/1/2/"),
+        ],
+        card=[card(10, "d", 2)],
+    )
+    local = local_from(index, [(COLLECTION, 1)], {eid("a")})
+    local.entities[eid("n")] = new_card_in(eid("b"))
+
+    plan = build_plan(local, connected(index), unmanaged="delete")
+
+    assert [(op.action, op.entity_id) for op in plan.operations] == [
+        ("create", eid("n"))
+    ]
+    assert not plan.conflicts
+    assert {(k.entity_id, k.reason) for k in plan.kept} == {
+        (eid("b"), "used by n.yaml"),
+        (eid("e"), "holds collection 'coll b'"),
+        (eid("d"), "inside collection 'coll e', which is kept"),
+    }
+    assert plan.unmanaged == []
+
+
+def test_a_metabase_collection_holding_a_managed_item_being_removed_goes_too():
+    index = remote(
+        collection=[collection(1, "a"), collection(2, "s", "/1/")],
+        card=[card(10, "m", 2)],
+    )
+    local = local_from(index, [(COLLECTION, 1)], {eid("a"), eid("m")})
+
+    plan = build_plan(local, connected(index), unmanaged="archive")
+
+    assert not plan.conflicts
+    assert [(op.action, op.entity_id) for op in plan.operations] == [
+        ("archive", eid("s"))
+    ]
+    assert [c.entity_id for c in plan.cascaded] == [eid("m")]
+
+
+def test_removing_a_collection_whose_contents_are_removed_anyway_is_not_a_conflict():
+    index = remote(
+        collection=[collection(1, "a"), collection(2, "x", "/1/")],
+        card=[card(10, "y", 2)],
+    )
+    local = local_from(index, [(COLLECTION, 1)], {eid("a"), eid("x")})
+
+    plan = build_plan(local, connected(index), unmanaged="archive")
+
+    assert not plan.conflicts
+    assert [(op.action, op.entity_id) for op in plan.operations] == [
+        ("archive", eid("x"))
+    ]
+    assert [c.entity_id for c in plan.cascaded] == [eid("y")]
+
+
+def holding_a_document() -> Index:
+    index = remote(collection=[collection(1, "a"), collection(2, "x", "/1/")])
+    index.documents.append(
+        RemoteItem.model_validate(
+            {"id": 7, "entity_id": eid("d"), "name": "notes", "collection_id": 2}
+        )
+    )
+    return index
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_removing_a_collection_holding_a_document_is_blocked(force):
+    index = holding_a_document()
+    local = local_from(index, [(COLLECTION, 1)], {eid("a"), eid("x")})
+
+    plan = build_plan(local, connected(index), force=force)
+
+    assert plan.empty
+    assert [(c.entity_id, c.change) for c in plan.blocked] == [
+        (eid("x"), "removed here, but holds document 'notes'")
+    ]
+
+
+def test_a_metabase_collection_holding_a_document_is_kept():
+    index = holding_a_document()
+    local = local_from(index, [(COLLECTION, 1)], {eid("a")})
+
+    plan = build_plan(local, connected(index), unmanaged="delete")
+
+    assert plan.empty
+    assert not plan.conflicts
+    assert [(k.entity_id, k.reason) for k in plan.kept] == [
+        (eid("x"), "holds document 'notes'")
+    ]
+
+
+def test_a_metabase_collection_holding_a_timeline_is_kept():
+    index = remote(collection=[collection(1, "a"), collection(2, "x", "/1/")])
+    index.timelines.append(
+        RemoteItem.model_validate(
+            {"id": 3, "entity_id": eid("r"), "name": "releases", "collection_id": 2}
+        )
+    )
+    local = local_from(index, [(COLLECTION, 1)], {eid("a")})
+
+    plan = build_plan(local, connected(index), unmanaged="archive")
+
+    assert plan.empty
+    assert [(k.entity_id, k.reason) for k in plan.kept] == [
+        (eid("x"), "holds timeline 'releases'")
+    ]
+
+
+def test_a_kept_dashboard_keeps_its_subscriptions():
+    index = board_with_slack_subscription()
+    local = local_from(index, [(COLLECTION, 1)], {eid("a")})
+    entity = new_card_in(eid("a"))
+    entity.data = entity.data.model_copy(update={"dashboard_id": eid("b")})
+    local.entities[eid("n")] = entity
+
+    plan = build_plan(local, connected(index), unmanaged="archive")
+
+    assert {(k.entity_id, k.reason) for k in plan.kept} == {
+        (eid("b"), "used by n.yaml"),
+        (eid("s"), "inside dashboard 'board', which is kept"),
+    }
+
+
+def test_what_a_kept_dashboard_shows_is_kept():
+    index = remote(
+        collection=[collection(1, "a")],
+        card=[card(11, "y", 1)],
+        dashboard=[
+            {
+                "id": 20,
+                "entity_id": eid("b"),
+                "name": "board",
+                "collection_id": 1,
+                "dashcards": [
+                    {
+                        "id": 1,
+                        "entity_id": eid("x"),
+                        "card_id": 11,
+                        "row": 0,
+                        "col": 0,
+                        "size_x": 4,
+                        "size_y": 4,
+                    }
+                ],
+                "updated_at": "2026-01-01",
+            }
+        ],
+    )
+    local = local_from(index, [(COLLECTION, 1)], {eid("a")})
+    entity = new_card_in(eid("a"))
+    entity.data = entity.data.model_copy(update={"dashboard_id": eid("b")})
+    local.entities[eid("n")] = entity
+
+    plan = build_plan(local, connected(index), unmanaged="delete")
+
+    assert [op.action for op in plan.operations] == ["create"]
+    assert {(k.entity_id, k.reason) for k in plan.kept} == {
+        (eid("b"), "used by n.yaml"),
+        (eid("y"), "used by dashboard 'board'"),
+    }
+
+
+def board_showing(card_id: int) -> dict[str, Any]:
+    return {
+        "id": 20,
+        "entity_id": eid("b"),
+        "name": "board",
+        "collection_id": 1,
+        "dashcards": [
+            {
+                "id": 1,
+                "entity_id": eid("x"),
+                "card_id": card_id,
+                "row": 0,
+                "col": 0,
+                "size_x": 4,
+                "size_y": 4,
+            }
+        ],
+        "updated_at": "2026-01-01",
+    }
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_removing_a_question_a_metabase_only_dashboard_shows_needs_force(force):
+    index = remote(
+        collection=[collection(1, "a")],
+        card=[card(10, "q", 1)],
+        dashboard=[board_showing(10)],
+    )
+    local = local_from(index, [(COLLECTION, 1)], {eid("a"), eid("q")})
+
+    plan = build_plan(local, connected(index), force=force)
+
+    assert not plan.blocked
+    if force:
+        assert [(op.action, op.entity_id) for op in plan.operations] == [
+            ("archive", eid("q"))
+        ]
+    else:
+        change = "removed here, but is used by dashboard 'board', which is not in"
+        assert plan.empty
+        assert [(c.entity_id, c.change) for c in plan.conflicts] == [
+            (eid("q"), f"{change} the files")
+        ]
+
+
+def test_removing_a_question_a_managed_dashboard_shows_is_blocked():
+    index = remote(
+        collection=[collection(1, "a")],
+        card=[card(10, "q", 1)],
+        dashboard=[board_showing(10)],
+    )
+    local = local_from(
+        index, [(COLLECTION, 1), (DASHBOARD, 20)], {eid("a"), eid("q"), eid("b")}
+    )
+
+    plan = build_plan(local, connected(index), force=True)
+
+    assert [(c.entity_id, c.change) for c in plan.blocked] == [
+        (eid("q"), f"removed here, but is used by {eid('b')}.yaml")
+    ]
+
+
+def test_deleting_never_destroys_what_the_plan_only_archives():
+    index = remote(
+        collection=[collection(1, "a"), collection(2, "x", "/1/")],
+        card=[card(10, "y", 2)],
+    )
+    local = local_from(index, [(COLLECTION, 1)], {eid("a"), eid("x")})
+
+    plan = build_plan(local, connected(index), removal="delete", unmanaged="archive")
+
+    assert eid("x") not in [op.entity_id for op in plan.operations]
+    assert [c.entity_id for c in plan.blocked] == [eid("x")]
+    assert "deleting it would also delete card 'card y'" in plan.blocked[0].change
+
+
+@pytest.mark.parametrize(
+    ("scope", "root_question", "removed"),
+    [(None, True, True), (None, False, False), ({eid("a")}, False, False)],
+)
+def test_the_root_is_managed_only_once_a_whole_instance_repo_exports_it(
+    scope, root_question, removed
+):
+    index = remote(
+        collection=[collection(1, "a"), collection(2, "o")], card=[card(10, "r", None)]
+    )
+    files = [(COLLECTION, 1), (CARD, 10)] if root_question else [(COLLECTION, 1)]
+    managed = {eid("a"), eid("r")} if root_question else {eid("a")}
+    local = local_from(index, files, managed)
+
+    plan = build_plan(local, connected(index), scope=scope, unmanaged="archive")
+
+    assert (eid("o") in [op.entity_id for op in plan.operations]) is removed
+    assert (eid("o") in [u.entity_id for u in plan.unmanaged]) is not removed
+
+
+def test_forcing_lists_what_goes_with_the_archived_collection():
+    index = remote(
+        collection=[collection(1, "a"), collection(2, "c", "/1/")],
+        card=[card(10, "q", 2)],
+        dashboard=[{**board_showing(10), "collection_id": None}],
+    )
+    local = local_from(index, [(COLLECTION, 1)], {eid("a"), eid("c")})
+
+    plan = build_plan(local, connected(index), unmanaged="archive", force=True)
+
+    assert [(op.action, op.entity_id) for op in plan.operations] == [
+        ("archive", eid("c"))
+    ]
+    assert [c.entity_id for c in plan.cascaded] == [eid("q")]
+    assert eid("q") not in [k.entity_id for k in plan.kept]
+
+
+def test_nothing_is_swept_along_with_a_blocked_removal():
+    index = holding_a_document()
+    index.add(CARD, card(10, "q", 2))
+    local = local_from(index, [(COLLECTION, 1)], {eid("a"), eid("x")})
+
+    plan = build_plan(local, connected(index), force=True)
+
+    assert plan.empty
+    assert [c.entity_id for c in plan.blocked] == [eid("x")]
+    assert eid("q") in [u.entity_id for u in plan.unmanaged]
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_an_edit_made_in_metabase_never_blocks_its_collection(force):
+    index = remote(
+        collection=[collection(1, "a"), collection(2, "c", "/1/")],
+        card=[card(10, "m", 2)],
+    )
+    local = local_from(index, [(COLLECTION, 1)], {eid("a"), eid("c"), eid("m")})
+    local.state[eid("m")] = Managed("card", "edited since")
+
+    plan = build_plan(local, connected(index), force=force)
+
+    assert not plan.blocked
+    if force:
+        assert [(op.action, op.entity_id) for op in plan.operations] == [
+            ("archive", eid("c"))
+        ]
+    else:
+        assert {c.entity_id for c in plan.conflicts} == {eid("m"), eid("c")}
+
+
+def test_deleting_a_dashboard_takes_its_own_questions_with_it():
+    index = remote(
+        collection=[collection(1, "a")],
+        card=[card(11, "q", 1, dashboard_id=20)],
+        dashboard=[board_showing(11)],
+    )
+    local = local_from(index, [(COLLECTION, 1)], {eid("a")})
+
+    plan = build_plan(local, connected(index), unmanaged="delete")
+
+    assert [(op.action, op.entity_id) for op in plan.operations] == [
+        ("delete", eid("b"))
+    ]
+    assert [c.entity_id for c in plan.cascaded] == [eid("q")]
+
+
+def test_deleting_a_collection_keeps_its_trashed_timeline_and_lists_trashed_items():
+    index = remote(
+        collection=[collection(1, "a"), collection(2, "x", "/1/")],
+        card=[card(10, "z", 2, archived=True, archived_directly=True)],
+    )
+    local = local_from(index, [(COLLECTION, 1)], {eid("a"), eid("x")})
+    timeline = {"id": 3, "entity_id": eid("r"), "name": "releases"}
+    index.timelines.append(
+        RemoteItem.model_validate({**timeline, "collection_id": 2, "archived": True})
+    )
+
+    blocked = build_plan(local, connected(index), removal="delete", unmanaged="delete")
+    index.timelines.clear()
+    plan = build_plan(local, connected(index), removal="delete", unmanaged="delete")
+
+    assert "timeline 'releases'" in blocked.blocked[0].change
+    assert [(op.action, op.entity_id) for op in plan.operations] == [
+        ("delete", eid("x"))
+    ]
+    assert [c.entity_id for c in plan.cascaded] == [eid("z")]
+
+
+def test_a_metabase_only_subscription_goes_with_its_removed_dashboard():
+    index = board_with_slack_subscription()
+    local = local_from(index, [(COLLECTION, 1)], {eid("a"), eid("b")})
+
+    plan = build_plan(local, connected(index))
+
+    assert not plan.conflicts and not plan.blocked
+    assert [(op.action, op.entity_id) for op in plan.operations] == [
+        ("archive", eid("b"))
+    ]
+
+
+def test_a_repo_that_has_never_synced_removes_nothing():
+    index = remote(collection=[collection(1, "a")], card=[card(10, "c", 1)])
+    local = local_from(index, [], set())
+
+    plan = build_plan(local, connected(index), unmanaged="delete")
+
+    assert plan.empty
+    assert not plan.kept
+    assert {u.entity_id for u in plan.unmanaged} == {eid("a"), eid("c")}
+
+
+def test_unmanaged_items_are_archived_even_when_removal_deletes():
+    index = remote(collection=[collection(1, "a")], card=[card(10, "c", 1)])
+    local = local_from(index, [(COLLECTION, 1)], {eid("a")})
+
+    plan = build_plan(local, connected(index), removal="delete", unmanaged="archive")
+
+    assert [op.action for op in plan.operations] == ["archive"]
+
+
+def test_questions_inside_documents_are_never_removed():
+    index = remote(
+        collection=[collection(1, "a")], card=[card(10, "c", 1, document_id=5)]
+    )
+    local = local_from(index, [(COLLECTION, 1)], {eid("a")})
+
+    plan = build_plan(local, connected(index), unmanaged="delete")
 
     assert plan.empty
     assert [u.entity_id for u in plan.unmanaged] == [eid("c")]
@@ -874,3 +1464,44 @@ def test_a_create_that_lands_after_recovery_is_imported_not_duplicated(tmp_path)
 
     assert plan.renames == {eid("n"): eid("c")}
     assert "create" not in [op.action for op in plan.operations]
+
+
+def test_recovery_does_not_take_over_items_it_was_removing(tmp_path):
+    journal = Journal(tmp_path)
+    journal.record(
+        Started(
+            op=f"{eid('c')}:base:archive",
+            action="archive",
+            kind=CARD,
+            entity_id=eid("c"),
+            name="stray",
+        )
+    )
+    local = LocalTree(root=tmp_path)
+
+    reconcile(offline_client(), v58, journal, local)
+
+    assert eid("c") not in local.state
+
+
+def test_fmt_does_not_count_as_a_first_sync(tmp_path):
+    yamlio.write(tmp_path / CONFIG, {})
+    yamlio.write(
+        tmp_path / "collections" / "main" / "new.yaml",
+        {
+            "name": "New",
+            "display": "table",
+            "dataset_query": {
+                "lib/type": "mbql/query",
+                "database": "Warehouse",
+                "stages": [{"lib/type": "mbql.stage/native", "native": "SELECT 1"}],
+            },
+            "visualization_settings": {},
+            "serdes/meta": [{"model": "Card"}],
+        },
+    )
+
+    assigned, _ = workflow.fmt(tmp_path)
+
+    assert assigned
+    assert not (tmp_path / STATE).exists()

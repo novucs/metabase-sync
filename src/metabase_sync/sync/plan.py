@@ -1,12 +1,11 @@
 from metabase_sync.errors import ValidationFailed
-from metabase_sync.format.representations import KINDS
 from metabase_sync.metabase.remote import Remote
 from metabase_sync.store.tree import LocalTree
 from metabase_sync.sync.compare import compare
 from metabase_sync.sync.match import find_imports, renamed
-from metabase_sync.sync.operations import ARCHIVE, POSITIVE, RESTORE, Plan, Ref
+from metabase_sync.sync.operations import ARCHIVE, POSITIVE, RESTORE, Plan
 from metabase_sync.sync.order import ordered
-from metabase_sync.sync.remove import removals
+from metabase_sync.sync.remove import KEEP, removals
 from metabase_sync.sync.validate import remote_problems, unknown_tables_and_fields
 
 
@@ -16,6 +15,7 @@ def build_plan(
     removal: str = ARCHIVE,
     scope: set[str] | None = None,
     force: bool = False,
+    unmanaged: str = KEEP,
 ) -> Plan:
     renames, ambiguous = find_imports(tree, remote)
     tree = renamed(tree, renames)
@@ -28,7 +28,16 @@ def build_plan(
     if problems:
         raise ValidationFailed(problems)
     restores = [op for op in compared.operations if op.action == RESTORE]
-    removed = removals(tree, remote, removal, restores, force)
+    removed = removals(
+        tree,
+        remote,
+        removal,
+        restores,
+        force,
+        unmanaged,
+        whole_instance=scope is None,
+        writing=writing,
+    )
     return Plan(
         metabase=remote.index.version,
         force=force,
@@ -36,18 +45,9 @@ def build_plan(
         renames=renames,
         drift=compared.drift,
         conflicts=[*compared.conflicts, *removed.conflicts],
+        blocked=removed.blocked,
         diffs=compared.diffs,
         cascaded=removed.cascaded,
-        unmanaged=unmanaged(tree, remote),
+        unmanaged=removed.unmanaged,
+        kept=removed.kept,
     )
-
-
-def unmanaged(tree: LocalTree, remote: Remote) -> list[Ref]:
-    return [
-        Ref(kind=kind, entity_id=item.entity_id, name=item.name)
-        for kind in KINDS
-        for item in remote.index.live(kind)
-        if item.entity_id
-        and item.entity_id not in tree.entities
-        and item.entity_id not in tree.state
-    ]

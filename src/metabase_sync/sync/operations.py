@@ -70,6 +70,10 @@ class Drift(Ref):
     change: str
 
 
+class Kept(Ref):
+    reason: str
+
+
 class Plan(BaseModel):
     format: Literal[3] = 3
     metabase: str
@@ -77,16 +81,18 @@ class Plan(BaseModel):
     operations: list[Operation] = []
     renames: dict[str, str] = {}
     conflicts: list[Drift] = []
+    blocked: list[Drift] = []
     drift: list[Drift] = []
     diffs: dict[str, str] = {}
     unmanaged: list[Ref] = []
+    kept: list[Kept] = []
     cascaded: list[Ref] = []
 
     @computed_field
     @property
     def fingerprint(self) -> str:
         payload = self.model_dump_json(
-            include={"force", "operations", "renames", "conflicts"}
+            include={"force", "operations", "renames", "conflicts", "blocked"}
         )
         return hashlib.sha256(payload.encode()).hexdigest()
 

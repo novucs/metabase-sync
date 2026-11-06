@@ -41,6 +41,7 @@ from metabase_sync.sync.operations import (
     CREATE,
     DELETE,
     IMPORT,
+    REMOVALS,
     RESTORE,
     UPDATE,
     Operation,
@@ -502,7 +503,11 @@ def reconcile(
     changed = record_ids(tree, mapping)
     tree.state = {mapping.get(eid, eid): entry for eid, entry in tree.state.items()}
     for entry in entries:
-        if isinstance(entry, Started) and entry.entity_id not in unconfirmed:
+        if (
+            isinstance(entry, Started)
+            and entry.action not in REMOVALS
+            and entry.entity_id not in unconfirmed
+        ):
             eid = mapping.get(entry.entity_id, entry.entity_id)
             tree.state[eid] = Managed(kind=entry.kind)
     write_state(tree.root, tree.state)

@@ -1,8 +1,11 @@
+from types import SimpleNamespace
+
 import pytest
 
 from metabase_sync import cli
 from metabase_sync.store import tree, yamlio
 from metabase_sync.sync import commands as workflow
+from metabase_sync.sync.operations import Drift, Kept, Plan
 
 
 def run(monkeypatch: pytest.MonkeyPatch, *args: str) -> int:
@@ -67,3 +70,53 @@ def test_items_with_missing_references_are_summarised_unless_verbose(
     assert ("card 'A'" in printed) is verbose
     assert ("2 items refer to" in printed) is not verbose
     assert printed.count("warning:") == 2 - (not verbose)
+
+
+def test_items_kept_despite_unmanaged_removal_are_listed_with_reasons(capsys):
+    plan = Plan(
+        metabase="v0.65.3",
+        kept=[
+            Kept(
+                kind="collection",
+                entity_id="N" * 21,
+                name="Notes",
+                reason="holds document 'Plan'",
+            )
+        ],
+    )
+
+    cli._print_plan(plan)
+
+    printed = capsys.readouterr().out
+    assert "Kept, though only in Metabase:" in printed
+    assert "collection 'Notes'  holds document 'Plan'" in printed
+    assert "export` brings" not in printed
+
+
+def test_plan_exits_1_on_a_blocked_removal_even_with_force(
+    tmp_path, monkeypatch, capsys
+):
+    yamlio.write(tmp_path / tree.CONFIG, {})
+    monkeypatch.setenv("METABASE_URL", "http://mb.test")
+    monkeypatch.setenv("METABASE_API_KEY", "k")
+    blocked = Drift(
+        kind="collection",
+        entity_id="F" * 21,
+        name="Finance",
+        change="removed here, but holds document 'Q3 notes'",
+    )
+    index = SimpleNamespace(warnings=[], broken=[])
+    prepared = SimpleNamespace(
+        notes=[],
+        report=SimpleNamespace(warnings=[]),
+        remote=SimpleNamespace(index=index),
+    )
+    plan = Plan(metabase="v0.65.3", force=True, blocked=[blocked])
+    monkeypatch.setattr(workflow, "plan", lambda *args, **kwargs: (prepared, plan))
+
+    code = run(monkeypatch, "plan", "--chdir", str(tmp_path), "--force")
+
+    printed = capsys.readouterr()
+    assert code == 1
+    assert "1 removal can't be applied, even with --force:" in printed.out
+    assert "collection 'Finance'" in printed.out

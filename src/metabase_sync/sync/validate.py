@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -9,6 +10,7 @@ from metabase_sync.format.representations import (
     DASHBOARD,
     SNIPPET,
     SUBSCRIPTION,
+    Item,
     collection_of,
 )
 from metabase_sync.format.representations.dashboard import Dashboard
@@ -16,6 +18,7 @@ from metabase_sync.metabase.references import DATABASE, FIELD, TABLE, walk
 from metabase_sync.metabase.remote import Remote
 from metabase_sync.store.tree import (
     CONFIG,
+    Entity,
     LocalTree,
     ancestors,
     container_refs,
@@ -119,7 +122,7 @@ def unmanaged_snippets(tree: LocalTree, remote: Remote) -> list[str]:
     problem = (
         f"{CONFIG} doesn't manage snippets, but there {verb} "
         f"{count(len(found), 'snippet file')}, such as {found[0]}; set "
-        "`snippets: true` to manage them, or run `metabase-sync export` to remove them"
+        "`snippets: true` to manage them, or delete the files"
     )
     return [problem]
 
@@ -144,36 +147,52 @@ def _references(value: Any) -> list[tuple[str, Any]]:
     return found
 
 
+def item_references(kind: str, data: Item) -> Iterator[tuple[str, str, Any]]:
+    containers = CONTAINERS[kind]
+    for key, value in representations.write(data).items():
+        refs = [(containers[key], value)] if key in containers else _references(value)
+        for ref_kind, ref in refs:
+            yield key, ref_kind, ref
+
+
+def references(tree: LocalTree) -> Iterator[tuple[Entity, str, str, Any]]:
+    for entity in tree.entities.values():
+        for key, kind, ref in item_references(entity.kind, entity.data):
+            yield entity, key, kind, ref
+
+
+def items_used_by(kind: str, data: Item, containers: bool = True) -> set[str]:
+    return {
+        ref
+        for key, ref_kind, ref in item_references(kind, data)
+        if isinstance(ref, str)
+        and ref_kind not in (DATABASE, TABLE, FIELD)
+        and (containers or key not in CONTAINERS[kind])
+    }
+
+
 def missing_references(tree: LocalTree, remote: Remote) -> list[str]:
     index = remote.index
     problems: list[str] = []
-    for entity in tree.entities.values():
-        containers = CONTAINERS[entity.kind]
-        for key, value in representations.write(entity.data).items():
-            refs = (
-                [(containers[key], value)] if key in containers else _references(value)
+    for entity, key, kind, ref in references(tree):
+        if not isinstance(ref, str) or kind in (TABLE, FIELD):
+            continue
+        if kind == DATABASE and len(index.databases.get(ref, [])) > 1:
+            problems.append(
+                f"{entity.path}: {key} refers to database {ref!r}, but "
+                f"{len(index.databases[ref])} databases in Metabase have that "
+                "name; rename one of them in Metabase"
             )
-            for kind, ref in refs:
-                if not isinstance(ref, str) or kind in (TABLE, FIELD):
-                    continue
-                if kind == DATABASE and len(index.databases.get(ref, [])) > 1:
-                    problems.append(
-                        f"{entity.path}: {key} refers to database {ref!r}, but "
-                        f"{len(index.databases[ref])} databases in Metabase have that "
-                        "name; rename one of them in Metabase"
-                    )
-                    continue
-                if kind == DATABASE:
-                    exists = ref in index.databases
-                else:
-                    exists = (
-                        ref in tree.entities or index.existing_id(kind, ref) is not None
-                    )
-                if not exists:
-                    problems.append(
-                        f"{entity.path}: {key} refers to {kind} {ref}, which "
-                        "doesn't exist in the files or in Metabase"
-                    )
+            continue
+        if kind == DATABASE:
+            exists = ref in index.databases
+        else:
+            exists = ref in tree.entities or index.existing_id(kind, ref) is not None
+        if not exists:
+            problems.append(
+                f"{entity.path}: {key} refers to {kind} {ref}, which "
+                "doesn't exist in the files or in Metabase"
+            )
     return problems
 
 

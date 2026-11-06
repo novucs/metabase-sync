@@ -306,7 +306,7 @@ def current_files(root: Path) -> dict[Path, str]:
 def write_tree(
     root: Path,
     rendered: dict[Path, str],
-    state: dict[str, Managed],
+    state: dict[str, Managed] | None,
     moves: dict[Path, Path],
 ) -> None:
     current = current_files(root)
@@ -324,4 +324,5 @@ def write_tree(
         while folder.parent != root and not any(folder.iterdir()):
             folder.rmdir()
             folder = folder.parent
-    write_state(root, state)
+    if state is not None:
+        write_state(root, state)

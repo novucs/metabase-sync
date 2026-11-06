@@ -10,10 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `init --collection NAME` looks up collections by name or entity id and writes them under `collections:`.
+- `unmanaged: archive` or `unmanaged: delete` in `metabase-sync.yaml` removes items that exist in Metabase but were never in the files.
 
 ### Changed
 
 - With `collections` set, snippets are no longer managed; set `snippets: true` in `metabase-sync.yaml` to keep them.
+
+### Fixed
+
+- A removal that would break something that stays, such as a collection holding a document or a question another file uses, now stops `apply` until it's resolved, even with `--force`, instead of being skipped.
 
 ## [0.4.0] - 2026-11-06
 

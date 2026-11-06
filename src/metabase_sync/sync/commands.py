@@ -8,6 +8,7 @@ from pydantic import BaseModel, ValidationError
 
 from metabase_sync.errors import (
     ApplyStopped,
+    BlockedError,
     ConfigError,
     ConflictError,
     MetabaseSyncError,
@@ -61,6 +62,7 @@ class Config(BaseModel):
     collections: set[EntityId] | None = None
     snippets: bool | None = None
     removal: Literal["archive", "delete"] = ARCHIVE
+    unmanaged: Literal["keep", "archive", "delete"] = "keep"
 
     @property
     def manages_snippets(self) -> bool:
@@ -104,21 +106,18 @@ def find_collections(
         RemoteItem.model_validate(row, extra="ignore")
         for row in rows(client.get(path, **query))
     ]
-    candidates = [
-        (chain[-1].entity_id, chain[-1].name.strip().casefold(), chain)
-        for chain in manageable(listed).values()
-        if chain[-1].entity_id
-    ]
+    chains = [chain for chain in manageable(listed).values() if chain[-1].entity_id]
     found: dict[str, str] = {}
     for name in wanted:
-        matches = {
-            eid: " / ".join(link.name for link in chain)
-            for eid, folded, chain in candidates
-            if eid == name or folded == name.strip().casefold()
+        paths = {
+            chain[-1].entity_id or "": " / ".join(link.name for link in chain)
+            for chain in chains
+            if _named(chain[-1], name)
         }
-        if not matches and any(c.entity_id == name for c in listed):
+        matches = {eid: where for eid, where in paths.items() if eid == name} or paths
+        if not matches and any(_named(c, name) for c in listed):
             raise ConfigError(
-                f"Collection {name} is a personal or system collection, which "
+                f"Collection {name!r} is a personal or system collection, which "
                 "metabase-sync doesn't manage"
             )
         if not matches:
@@ -131,6 +130,12 @@ def find_collections(
             )
         found |= matches
     return list(found.items())
+
+
+def _named(collection: RemoteItem, name: str) -> bool:
+    return collection.entity_id == name or (
+        collection.name.strip().casefold() == name.strip().casefold()
+    )
 
 
 def remote_entities(remote: Remote) -> list[Entity]:
@@ -176,7 +181,8 @@ def export(
     local = read_tree(root)
     if local.problems:
         raise ValidationFailed(local.problems)
-    remote = connect(client, load_config(root), local)
+    config = load_config(root)
+    remote = connect(client, config, local)
     local = renamed(local, find_imports(local, remote)[0])
     pulled = {e.entity_id: e for e in remote_entities(remote)}
     conflicts: list[Drift] = []
@@ -295,7 +301,12 @@ def plan(
     prepared = prepare(client, root, recover)
     config = prepared.config
     result = build_plan(
-        prepared.tree, prepared.remote, config.removal, config.collections, force
+        prepared.tree,
+        prepared.remote,
+        config.removal,
+        config.collections,
+        force,
+        config.unmanaged,
     )
     return prepared, result
 
@@ -319,6 +330,8 @@ def plan_apply(
             + (f"; these items changed: {', '.join(differ)}" if differ else ""),
             hint="Run `metabase-sync plan --out` again and review it",
         )
+    if result.blocked:
+        raise BlockedError(result.blocked)
     if result.conflicts and not force:
         raise ConflictError(result.conflicts, len(result.drift))
     return prepared, result
@@ -402,7 +415,7 @@ def fmt(root: Path) -> tuple[list[str], Changes]:
     before = tree.current_files(root)
     moves = {e.path: paths[e.entity_id] for e in entities if e.path}
     if rendered != before:
-        tree.write_tree(root, rendered, local.state, moves)
+        tree.write_tree(root, rendered, None, moves)
     assigned = sorted(str(e.path) for e in entities if e.provisional)
     return assigned, tree.changes(before, rendered, moves)
 
@@ -427,7 +440,9 @@ def status(client: MetabaseClient, root: Path) -> Status:
     if result.interrupted or result.report.errors:
         return result
     remote = connect(client, config, local)
-    result.plan = build_plan(local, remote, config.removal, config.collections)
+    result.plan = build_plan(
+        local, remote, config.removal, config.collections, unmanaged=config.unmanaged
+    )
     groups: dict[tuple[str, str, int | None], list[RemoteItem]] = {}
     for kind in KINDS:
         for item in remote.index.live(kind):

@@ -6,6 +6,7 @@ import pytest
 from metabase_sync.errors import (
     ApiError,
     ApplyStopped,
+    BlockedError,
     ConflictError,
     NotKeptError,
     ValidationFailed,
@@ -745,18 +746,22 @@ def test_removal_delete_deletes_only_what_the_plan_names(client, mb, tmp_path):
         {"collections": [rich.collection["entity_id"]], "removal": "delete"},
     )
     workflow.export(client, root)
+    holder_path = path_of(root, holder["entity_id"])
+    holder_file = holder_path.read_text()
     for item in (card, board, inner, doomed, holder):
         path_of(root, item["entity_id"]).unlink()
 
-    _, plan = workflow.plan(client, root, force=True)
-    apply(client, root, force=True)
+    _, refused = workflow.plan(client, root, force=True)
+    holder_path.write_text(holder_file)
+    _, plan = workflow.plan(client, root)
+    apply(client, root)
 
+    assert [c.entity_id for c in refused.blocked] == [holder["entity_id"]]
+    assert hidden["name"] in refused.blocked[0].change
     deleted = [card, board, inner, doomed]
     assert sorted(op.entity_id for op in plan.operations if op.action == "delete") == (
         sorted(item["entity_id"] for item in deleted)
     )
-    assert [c.entity_id for c in plan.conflicts] == [holder["entity_id"]]
-    assert hidden["name"] in plan.conflicts[0].change
     gone = [
         f"/api/card/{card['id']}",
         f"/api/dashboard/{board['id']}",
@@ -823,9 +828,10 @@ def test_removal_delete_keeps_subscriptions_and_timelines_it_does_not_manage(
         path_of(root, item["entity_id"]).unlink()
 
     _, plan = workflow.plan(client, root, force=True)
-    apply(client, root, force=True)
+    with pytest.raises(BlockedError):
+        apply(client, root, force=True)
 
-    assert sorted(c.entity_id for c in plan.conflicts) == sorted(
+    assert sorted(c.entity_id for c in plan.blocked) == sorted(
         [board["entity_id"], dated["entity_id"]]
     )
     assert not [op for op in plan.operations if op.action == "delete"]

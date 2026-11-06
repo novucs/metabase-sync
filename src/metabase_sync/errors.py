@@ -105,6 +105,16 @@ class ConflictError(MetabaseSyncError):
         self.conflicts = conflicts
 
 
+class BlockedError(MetabaseSyncError):
+    def __init__(self, blocked: list[Drift]) -> None:
+        super().__init__(
+            f"{count(len(blocked), 'removal')} can't be applied, even with --force",
+            hint="Each line names what still needs the item: restore its file, or "
+            "first change that, in the files or in Metabase",
+        )
+        self.blocked = blocked
+
+
 class UnresolvedReferenceError(MetabaseSyncError):
     pass
 

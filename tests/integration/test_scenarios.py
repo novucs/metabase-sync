@@ -246,20 +246,100 @@ def test_snippet_files_left_in_a_scoped_repo_are_refused_until_exported(
     assert_clean(client, root)
 
 
+@pytest.mark.parametrize("mode", ["archive", "delete"])
+def test_items_created_in_metabase_are_removed_when_configured(
+    client, mb, tmp_path, mode
+):
+    rich, root = exported(client, mb, tmp_path)
+    config = yamlio.read(root / "metabase-sync.yaml")
+    yamlio.write(root / "metabase-sync.yaml", {**config, "unmanaged": mode})
+    stray = mb.create_native_card(
+        unique("Scratch"), "SELECT 1", collection_id=rich.collection["id"]
+    )
+
+    done = apply(client, root)
+
+    assert done == [(mode, "card", stray["name"])]
+    if mode == "archive":
+        assert mb.get_card(stray["id"])["archived"] is True
+    else:
+        assert mb.status(f"/api/card/{stray['id']}") == 404
+    assert_clean(client, root)
+
+
+def test_a_repo_that_has_never_synced_removes_nothing(client, mb, tmp_path):
+    rich = build_rich(mb)
+    root = tmp_path / "root"
+    root.mkdir()
+    yamlio.write(
+        root / "metabase-sync.yaml",
+        {"collections": [rich.collection["entity_id"]], "unmanaged": "delete"},
+    )
+
+    result = workflow.status(client, root)
+
+    assert result.plan is not None and result.plan.empty
+    assert rich.collection["entity_id"] in [u.entity_id for u in result.plan.unmanaged]
+
+
+def test_widening_the_scope_removes_nothing_until_exported(client, mb, tmp_path):
+    rich, root = exported(client, mb, tmp_path)
+    other = mb.create_collection(unique("Other"))
+    card = mb.create_native_card(unique("Kept"), "SELECT 1", collection_id=other["id"])
+    yamlio.write(
+        root / "metabase-sync.yaml",
+        {
+            "collections": [rich.collection["entity_id"], other["entity_id"]],
+            "unmanaged": "delete",
+        },
+    )
+
+    _, plan = workflow.plan(client, root)
+    workflow.export(client, root)
+
+    assert plan.empty
+    assert card["entity_id"] in [u.entity_id for u in plan.unmanaged]
+    assert card["entity_id"] in read_tree(root).entities
+    assert_clean(client, root)
+
+
+@pytest.mark.parametrize("mode", ["archive", "delete"])
+def test_a_collection_created_in_metabase_with_a_document_is_kept(
+    client, mb, tmp_path, mode
+):
+    rich, root = exported(client, mb, tmp_path)
+    config = yamlio.read(root / "metabase-sync.yaml")
+    yamlio.write(root / "metabase-sync.yaml", {**config, "unmanaged": mode})
+    notes = mb.create_collection(unique("Notes"), parent_id=rich.collection["id"])
+    document = mb.post(
+        "/api/document",
+        {
+            "name": unique("Plan"),
+            "collection_id": notes["id"],
+            "document": {"type": "doc", "content": []},
+        },
+    )
+
+    _, plan = workflow.plan(client, root)
+
+    assert plan.empty
+    assert not plan.conflicts
+    assert (notes["entity_id"], f"holds document {document['name']!r}") in [
+        (k.entity_id, k.reason) for k in plan.kept
+    ]
+    assert mb.get(f"/api/document/{document['id']}")["archived"] is False
+
+
 def test_removing_a_card_and_its_dashcard_together(client, mb, tmp_path):
     rich, root = exported(client, mb, tmp_path)
     path_of(root, rich.gui["entity_id"]).unlink()
-    dash_path = path_of(root, rich.dashboard["entity_id"])
-    dash = yamlio.read(dash_path)
-    dash["dashcards"] = [
-        dc for dc in dash["dashcards"] if dc.get("card_id") != rich.gui["entity_id"]
-    ]
-    yamlio.write(dash_path, dash)
+    stop_using_gui(root, rich)
 
     _, plan = workflow.plan(client, root)
     apply(client, root)
 
     assert [(op.action, op.kind) for op in plan.operations] == [
+        ("update", "card"),
         ("update", "dashboard"),
         ("archive", "card"),
     ]
@@ -268,16 +348,27 @@ def test_removing_a_card_and_its_dashcard_together(client, mb, tmp_path):
     assert workflow.export(client, root, check=True).clean
 
 
+def stop_using_gui(root: Path, rich) -> None:
+    gui = rich.gui["entity_id"]
+    dash_path = path_of(root, rich.dashboard["entity_id"])
+    dash = yamlio.read(dash_path)
+    dash["dashcards"] = [dc for dc in dash["dashcards"] if dc.get("card_id") != gui]
+    yamlio.write(dash_path, dash)
+    native_path = path_of(root, rich.native["entity_id"])
+    native = yamlio.read(native_path)
+    mappings = [
+        m for m in native.pop("parameter_mappings", []) if m.get("card_id") != gui
+    ]
+    yamlio.write(
+        native_path, native | ({"parameter_mappings": mappings} if mappings else {})
+    )
+
+
 def remove_child_collection(root: Path, rich) -> None:
     child = path_of(root, rich.child["entity_id"])
     shutil.rmtree(child.with_suffix(""))
     child.unlink()
-    dash_path = path_of(root, rich.dashboard["entity_id"])
-    dash = yamlio.read(dash_path)
-    dash["dashcards"] = [
-        dc for dc in dash["dashcards"] if dc.get("card_id") != rich.gui["entity_id"]
-    ]
-    yamlio.write(dash_path, dash)
+    stop_using_gui(root, rich)
 
 
 def test_removing_a_collection_archives_it_once_with_its_contents(client, mb, tmp_path):
@@ -288,6 +379,7 @@ def test_removing_a_collection_archives_it_once_with_its_contents(client, mb, tm
     apply(client, root)
 
     assert [(op.action, op.kind) for op in plan.operations] == [
+        ("update", "card"),
         ("update", "dashboard"),
         ("archive", "collection"),
     ]

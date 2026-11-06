@@ -88,8 +88,9 @@ def test_init_prints_the_lines_to_add_when_the_config_exists(
     assert printed.count(f"- {collection['entity_id']}  # {collection['name']}") == 1
 
 
+@pytest.mark.parametrize("field", ["entity_id", "name"])
 def test_init_explains_that_a_personal_collection_cannot_be_managed(
-    mb, tmp_path, monkeypatch, capsys, connected
+    mb, tmp_path, monkeypatch, capsys, connected, field
 ):
     personal = mb.get(f"/api/collection/{mb.admin_user()['personal_collection_id']}")
 
@@ -99,7 +100,7 @@ def test_init_explains_that_a_personal_collection_cannot_be_managed(
         "--chdir",
         str(tmp_path),
         "--collection",
-        personal["entity_id"],
+        personal[field],
     )
 
     assert code == 1

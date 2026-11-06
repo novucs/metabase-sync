@@ -95,11 +95,13 @@ collections:
   - HyocLue0f_iGHD90nRWrl
 snippets: false
 removal: archive
+unmanaged: keep
 ```
 
 - `collections` limits the files to those collections and everything inside them. Leave it out to manage the whole instance. `metabase-sync init --collection NAME` looks up a collection's entity id, and prints the line to add when the file already exists.
 - `snippets` decides whether the files hold the instance's snippets. It defaults to `true` without `collections` and `false` with it, so repos that each manage their own collections leave the shared snippets alone. Questions can use snippets either way.
 - `removal` is `archive` (the default) or `delete`. It decides what `apply` does with an item whose file you removed.
+- `unmanaged` is `keep` (the default), `archive`, or `delete`. It decides what `apply` does with items in Metabase that were never in the files, such as a question created in Metabase since the last export. See [Removing items](#removing-items).
 
 ## Changes on both sides
 
@@ -148,7 +150,7 @@ subscriptions/
 - References between items use entity ids. Databases, tables, and fields are referenced by name, so the files apply to any instance with the same databases.
 - SQL with several lines is stored as a literal block, exactly as written.
 - Same-named siblings get a short id suffix, so paths never change because of an unrelated item.
-- `apply` only archives items listed in `metabase-sync.state`, so content created in Metabase since the last export is never touched.
+- With `unmanaged: keep` (the default), `apply` only removes items listed in `metabase-sync.state`, so content created in Metabase since the last export is never touched.
 - A subscription takes its name and its cards from its dashboard, as Metabase does. `attachments` lists the dashcards sent as CSV or XLSX, by dashcard `entity_id`, with Metabase's `include_csv`, `include_xls`, `format_rows`, and `pivot_results` settings.
 
 ## Writing new items by hand
@@ -181,9 +183,13 @@ A file for an item that exists in Metabase but not in `metabase-sync.state` plan
 
 ## Removing items
 
-Delete the file. `plan` shows an archive (or a delete with `removal: delete`). Removing a collection archives it once; Metabase archives its contents with it, and `plan` lists them. If a removed collection or dashboard holds items that are not in the files, `plan` stops with a conflict until you export them or pass `--force`. Remove a question's dashcards along with its file.
+Delete the file. `plan` shows an archive (or a delete with `removal: delete`). Removing a collection archives it once; Metabase archives its contents with it, and `plan` lists them. A dashboard takes its own questions and its subscriptions with it. Remove a question's dashcards along with its file.
 
-With `removal: delete`, each removed item gets its own delete. Deleting a collection or dashboard in Metabase also deletes what it holds: its questions, dashboards, and collections (archived ones included), the subscriptions on those dashboards, and a collection's timelines. `plan` refuses to delete one that holds any of these that the plan doesn't delete, even with `--force`.
+A removal never breaks what stays. If anything that stays uses the item or sits inside it, such as a dashboard showing the question or a document in the collection, `plan` refuses the removal, even with `--force`. The one exception is items that only exist in Metabase with `unmanaged: keep`: `plan` stops until you export them, or `--force` removes the item anyway.
+
+With `removal: delete`, each removed item gets its own delete. Deleting a collection or dashboard in Metabase also deletes what it holds, archived items included, so `plan` refuses a delete that would destroy anything the plan doesn't delete.
+
+With `unmanaged: archive` or `unmanaged: delete`, `apply` also removes items that only exist in Metabase but sit inside a collection or dashboard the files manage, such as a question someone added to a managed collection. The same rule applies: anything that stays keeps what it uses and what holds it, and `plan` lists those items with the reason. Everything outside the managed collections is left alone, so a new repo, a wider `collections:`, or another Metabase instance removes nothing until you export. Top-level items count as managed only in a repo without `collections:` whose files hold a top-level question or dashboard. metabase-sync can't see what other repos, other users' personal collections, or links inside documents use; with `unmanaged: delete`, items that only exist in Metabase are deleted permanently.
 
 ## Safety
 
