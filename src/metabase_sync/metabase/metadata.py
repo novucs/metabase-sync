@@ -39,7 +39,6 @@ class Metadata:
         self._client = client
         self._databases = databases
         self._known = {db_id for ids in databases.values() for db_id in ids}
-        self.in_scope: set[int] = set()
         self._lock = threading.Lock()
         self._loaded: set[int] = set()
         self._looked_up: set[str] = set()
@@ -48,9 +47,9 @@ class Metadata:
         self._field_by_id: dict[int, FieldRef] = {}
         self._field_id_by_ref: dict[FieldRef, int] = {}
 
-    def table_ref(self, table_id: int) -> list[Any]:
+    def table_ref(self, table_id: int, database: int | None = None) -> list[Any]:
         if table_id not in self._table_by_id:
-            self._find(f"/api/table/{table_id}", f"table id {table_id}")
+            self._find(f"/api/table/{table_id}", f"table id {table_id}", database)
         if table_id not in self._table_by_id:
             raise UnresolvedReferenceError(f"table id {table_id} not found")
         return list(self._table_by_id[table_id])
@@ -62,9 +61,9 @@ class Metadata:
             raise UnresolvedReferenceError(f"table {list(key)} not found")
         return self._table_id_by_ref[key]
 
-    def field_ref(self, field_id: int) -> list[Any]:
+    def field_ref(self, field_id: int, database: int | None = None) -> list[Any]:
         if field_id not in self._field_by_id:
-            self._find(f"/api/field/{field_id}", f"field id {field_id}")
+            self._find(f"/api/field/{field_id}", f"field id {field_id}", database)
         if field_id not in self._field_by_id:
             raise UnresolvedReferenceError(f"field id {field_id} not found")
         return list(self._field_by_id[field_id])
@@ -90,11 +89,10 @@ class Metadata:
             )
         return found[0]
 
-    def _find(self, path: str, what: str) -> None:
-        scope = self.in_scope & self._known
-        if scope:
-            for db_id in sorted(scope):
-                self._load(db_id)
+    def _find(self, path: str, what: str, database: int | None) -> None:
+        if database in self._known:
+            self._load(database)
+            self._looked_up.add(path)
         elif path not in self._looked_up:
             self._load_for(path, what)
 

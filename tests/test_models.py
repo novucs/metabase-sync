@@ -588,22 +588,31 @@ def test_a_missing_field_is_looked_up_in_metabase_only_once():
     ]
 
 
-def test_a_field_missing_from_the_databases_in_use_needs_no_lookup():
+def test_a_field_missing_from_its_known_database_is_gone_without_a_lookup():
     client = DeactivatedField()
     metadata = Metadata(client, {"Warehouse": [1]})
-    metadata.in_scope = {1}
 
-    for _ in range(2):
-        with pytest.raises(UnresolvedReferenceError):
-            metadata.field_ref(7)
+    with pytest.raises(UnresolvedReferenceError):
+        metadata.field_ref(7, database=1)
+    with pytest.raises(UnresolvedReferenceError):
+        metadata.field_ref(7)
 
     assert client.requested == ["/api/database/1/metadata"]
 
 
-def test_a_question_using_a_field_gone_from_its_database_says_so_without_lookups():
+def test_a_field_in_a_database_metabase_does_not_list_is_looked_up():
+    client = DeactivatedField()
+    metadata = Metadata(client, {"Warehouse": [1]})
+
+    with pytest.raises(UnresolvedReferenceError):
+        metadata.field_ref(7, database=13371337)
+
+    assert "/api/field/7" in client.requested
+
+
+def test_a_question_whose_query_uses_a_gone_field_says_so_without_lookups():
     client = DeactivatedField()
     found = index(client)
-    found.metadata.in_scope = {1}
     raw = {
         "id": 5,
         "entity_id": "Q" * 21,
@@ -611,15 +620,23 @@ def test_a_question_using_a_field_gone_from_its_database_says_so_without_lookups
         "type": "model",
         "display": "table",
         "database_id": 1,
-        "dataset_query": {"database": 1},
+        "dataset_query": {
+            "database": 1,
+            "type": "query",
+            "query": {
+                "source-table": 3,
+                "joins": [{"source-table": 4}],
+                "fields": [["field", 7, None]],
+            },
+        },
         "result_metadata": [{"name": "PRODUCT_ID", "fk_target_field_id": 7}],
     }
 
     Remote(index=found, api=v58).read(CARD, raw)
 
-    assert "/api/field/7" not in client.requested
+    assert client.requested == ["/api/database/1/metadata"]
     assert found.broken == [
-        "card 'Model' uses field 7, which no longer exists in the database"
+        "card 'Model' uses table 4 and field 7, which no longer exist in the database"
     ]
 
 

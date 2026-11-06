@@ -5,7 +5,7 @@ from pydantic import AliasPath, BaseModel, Field
 from metabase_sync.format.representations import COLLECTION, DASHBOARD
 from metabase_sync.format.representations.card import Card, ResultColumn
 from metabase_sync.metabase.index import Index
-from metabase_sync.metabase.references import FIELD, native, portable
+from metabase_sync.metabase.references import DATABASE, FIELD, native, portable
 
 ENDPOINT = "/api/card"
 LISTING = {"f": "all"}
@@ -74,7 +74,7 @@ class Request(BaseModel):
 
 def read(response: Response, ids: Index) -> Card:
     database = (
-        ids.lenient(ids.database_name, response.database_id, "database")
+        ids.lenient(ids.database_name, response.database_id, DATABASE)
         if response.database_id is not None
         else None
     )
@@ -96,7 +96,7 @@ def read(response: Response, ids: Index) -> Card:
         type=response.type,
         display=response.display,
         database_id=database if isinstance(database, str) else None,
-        dataset_query=portable(response.dataset_query, ids),
+        dataset_query=portable(response.dataset_query, ids, response.database_id),
         parameters=portable(response.parameters or [], ids),
         parameter_mappings=portable(response.parameter_mappings or [], ids),
         visualization_settings=portable(response.visualization_settings, ids),

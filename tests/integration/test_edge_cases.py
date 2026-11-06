@@ -391,9 +391,7 @@ def test_editing_cards_that_link_to_each_other(client, mb, tmp_path):
     assert_clean(client, root)
 
 
-def test_a_reference_to_a_field_that_no_longer_exists_is_kept(
-    client, mb, tmp_path, monkeypatch
-):
+def test_a_reference_to_a_field_that_no_longer_exists_is_kept(client, mb, tmp_path):
     rich, root = exported(client, mb, tmp_path)
     mb.update_card(
         rich.native["id"],
@@ -405,20 +403,12 @@ def test_a_reference_to_a_field_that_no_longer_exists_is_kept(
             }
         },
     )
-    requested: list[str] = []
-    get = client.get
-    monkeypatch.setattr(
-        client,
-        "get",
-        lambda path, **params: requested.append(path) or get(path, **params),
-    )
 
     result = workflow.export(client, root)
 
     name = rich.native["name"]
     gone = f"card {name!r} uses field 999999, which no longer exists in the database"
     assert gone in result.broken
-    assert not [path for path in requested if path.startswith("/api/field/")]
     assert_clean(client, root)
 
 

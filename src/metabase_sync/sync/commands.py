@@ -159,7 +159,7 @@ class ExportResult:
     conflicts: list[Drift]
     warnings: list[str]
     broken: list[str]
-    missing: list[str] = field(default_factory=list)
+    missing: list[str]
 
     @property
     def clean(self) -> bool:

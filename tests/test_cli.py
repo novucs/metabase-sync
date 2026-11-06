@@ -77,6 +77,28 @@ def test_items_with_missing_references_are_summarised_unless_verbose(
     assert printed.count("warning:") == (6 if verbose else 2)
 
 
+def test_a_single_item_with_a_missing_table_is_named(tmp_path, monkeypatch, capsys):
+    yamlio.write(tmp_path / tree.CONFIG, {})
+    monkeypatch.setenv("METABASE_URL", "http://mb.test")
+    monkeypatch.setenv("METABASE_API_KEY", "k")
+    result = workflow.ExportResult(
+        files=tree.Changes([], [], [], []),
+        kept=[],
+        conflicts=[],
+        warnings=[],
+        broken=["card 'A' uses table 1, which no longer exists in the database"],
+        missing=[],
+    )
+    monkeypatch.setattr(workflow, "export", lambda *args, **kwargs: result)
+
+    run(monkeypatch, "export", "--chdir", str(tmp_path))
+
+    printed = " ".join(capsys.readouterr().err.split())
+    assert printed == (
+        "warning: card 'A' uses table 1, which no longer exists in the database"
+    )
+
+
 def test_items_kept_despite_unmanaged_removal_are_listed_with_reasons(capsys):
     plan = Plan(
         metabase="v0.65.3",

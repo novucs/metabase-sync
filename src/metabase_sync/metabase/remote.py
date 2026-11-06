@@ -66,7 +66,10 @@ class Remote:
         finally:
             UNRESOLVED.reset(token)
         name = f"{kind} {raw.get('name')!r}"
-        gone = sorted(ref for ref in unresolved if ref[0] in (TABLE, FIELD))
+        gone = sorted(
+            (ref for ref in unresolved if ref[0] in (TABLE, FIELD)),
+            key=lambda ref: (ref[0] == FIELD, ref[1]),
+        )
         other = sorted(ref for ref in unresolved if ref[0] not in (TABLE, FIELD))
         if gone:
             verb = "exists" if len(gone) == 1 else "exist"

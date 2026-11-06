@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Questions and dashboards using tables or fields that no longer exist in the database get their own warning, separate from references to other things Metabase doesn't list.
+
 ### Fixed
 
-- The warning about questions and dashboards using tables or fields that no longer exist in the database now says so, and finding them no longer takes a request per missing table or field.
+- A question whose query uses tables or fields that no longer exist no longer takes a request per missing table or field.
 
 ## [0.4.1] - 2026-11-06
 
