@@ -106,8 +106,22 @@ def remote_problems(
         *mismatched_kinds(tree, remote),
         *missing_references(tree, remote),
         *outside_scope(tree, remote, scope),
+        *unmanaged_snippets(tree, remote),
         *removed_dashcard_filters(tree, remote),
     ]
+
+
+def unmanaged_snippets(tree: LocalTree, remote: Remote) -> list[str]:
+    found = [str(e.path) for e in tree.entities.values() if e.kind == SNIPPET]
+    if remote.index.snippets or not found:
+        return []
+    verb = "is" if len(found) == 1 else "are"
+    problem = (
+        f"{CONFIG} doesn't manage snippets, but there {verb} "
+        f"{count(len(found), 'snippet file')}, such as {found[0]}; set "
+        "`snippets: true` to manage them, or run `metabase-sync export` to remove them"
+    )
+    return [problem]
 
 
 def mismatched_kinds(tree: LocalTree, remote: Remote) -> list[str]:

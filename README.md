@@ -93,10 +93,12 @@ Environment variables, or a `.env` file in the directory the command runs in:
 ```yaml
 collections:
   - HyocLue0f_iGHD90nRWrl
+snippets: false
 removal: archive
 ```
 
-- `collections` limits the files to those collections and everything inside them. Leave it out to manage the whole instance. To find a collection's entity id, run `metabase-sync export` without `collections` and read `entity_id` in the collection's file. Snippets belong to the whole instance, so they are always managed.
+- `collections` limits the files to those collections and everything inside them. Leave it out to manage the whole instance. To find a collection's entity id, run `metabase-sync export` without `collections` and read `entity_id` in the collection's file.
+- `snippets` decides whether the files hold the instance's snippets. It defaults to `true` without `collections` and `false` with it, so repos that each manage their own collections leave the shared snippets alone. Questions can use snippets either way.
 - `removal` is `archive` (the default) or `delete`. It decides what `apply` does with an item whose file you removed.
 
 ## Changes on both sides

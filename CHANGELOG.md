@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- With `collections` set, snippets are no longer managed; set `snippets: true` in `metabase-sync.yaml` to keep them.
+
 ## [0.4.0] - 2026-11-06
 
 A rewrite. Files from 0.3 are not compatible; export into a new directory once.

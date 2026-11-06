@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from metabase_sync.errors import StalePlanError, StateError
+from metabase_sync.errors import StalePlanError, StateError, ValidationFailed
 from metabase_sync.format.representations.dashboard import Dashboard
 from metabase_sync.ids import new_entity_id
 from metabase_sync.metabase.client import UncertainWriteError
@@ -189,6 +189,60 @@ def test_a_nested_collection_can_be_managed_on_its_own(client, mb, tmp_path):
         ("update", "card"),
     ]
     assert mb.get_card(rich.gui["id"])["name"] == card["name"]
+    assert_clean(client, root)
+
+
+def snippets_in(root: Path) -> list[str]:
+    return [
+        e.entity_id for e in read_tree(root).entities.values() if e.kind == "snippet"
+    ]
+
+
+def test_a_scoped_repo_leaves_snippets_alone(client, mb, tmp_path):
+    rich, root = exported(client, mb, tmp_path)
+
+    assert snippets_in(root) == []
+    assert (
+        rich.snippet["entity_id"] in path_of(root, rich.native["entity_id"]).read_text()
+    )
+    assert_clean(client, root)
+
+
+def test_a_scoped_repo_can_opt_in_to_snippets(client, mb, tmp_path):
+    rich = build_rich(mb)
+    root = tmp_path / "root"
+    root.mkdir()
+    yamlio.write(
+        root / "metabase-sync.yaml",
+        {"collections": [rich.collection["entity_id"]], "snippets": True},
+    )
+
+    workflow.export(client, root)
+
+    assert rich.snippet["entity_id"] in snippets_in(root)
+    assert_clean(client, root)
+
+
+def test_snippet_files_left_in_a_scoped_repo_are_refused_until_exported(
+    client, mb, tmp_path
+):
+    rich = build_rich(mb)
+    root = tmp_path / "root"
+    root.mkdir()
+    config = {"collections": [rich.collection["entity_id"]], "snippets": True}
+    yamlio.write(root / "metabase-sync.yaml", config)
+    workflow.export(client, root)
+    yamlio.write(root / "metabase-sync.yaml", {"collections": config["collections"]})
+
+    with pytest.raises(ValidationFailed) as refused:
+        workflow.plan(client, root)
+    workflow.export(client, root)
+
+    assert any("snippets: true" in problem for problem in refused.value.problems)
+    assert snippets_in(root) == []
+    assert (
+        mb.get(f"/api/native-query-snippet/{rich.snippet['id']}")["archived"] is False
+    )
     assert_clean(client, root)
 
 

@@ -56,7 +56,12 @@ from metabase_sync.sync.validate import Report, validate
 
 class Config(BaseModel):
     collections: set[EntityId] | None = None
+    snippets: bool | None = None
     removal: Literal["archive", "delete"] = ARCHIVE
+
+    @property
+    def manages_snippets(self) -> bool:
+        return self.collections is None if self.snippets is None else self.snippets
 
 
 def load_config(root: Path) -> Config:
@@ -71,7 +76,7 @@ def load_config(root: Path) -> Config:
 
 def connect(client: MetabaseClient, config: Config, local: LocalTree) -> Remote:
     api = for_version(*client.supported_version)
-    index = fetch_index(client, config.collections)
+    index = fetch_index(client, config.collections, config.manages_snippets)
     unknown = sorted(
         eid
         for eid in config.collections or ()

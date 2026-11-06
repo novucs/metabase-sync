@@ -99,6 +99,7 @@ class Index:
     timelines: list[RemoteItem] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     broken: list[str] = field(default_factory=list)
+    snippets: bool = True
     _by_eid: dict[str, tuple[str, int]] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -230,7 +231,9 @@ LISTINGS: dict[str, tuple[str, dict[str, str]]] = {
 }
 
 
-def fetch_index(client: MetabaseClient, roots: set[str] | None = None) -> Index:
+def fetch_index(
+    client: MetabaseClient, roots: set[str] | None = None, snippets: bool = True
+) -> Index:
     listed = client.map(
         lambda listing: rows(client.get(listing[0], **listing[1])), LISTINGS.values()
     )
@@ -250,6 +253,7 @@ def fetch_index(client: MetabaseClient, roots: set[str] | None = None) -> Index:
             RemoteItem.model_validate(row, extra="ignore")
             for row in raw["timelines"] + raw["archived timelines"]
         ],
+        snippets=snippets,
     )
 
     summaries_of = [
@@ -295,7 +299,10 @@ def fetch_index(client: MetabaseClient, roots: set[str] | None = None) -> Index:
         index.add(DASHBOARD, with_detail(summary, detail))
 
     for row in raw["snippets"] + raw["archived snippets"]:
-        index.add(SNIPPET, row)
+        if snippets:
+            index.add(SNIPPET, row)
+        elif row.get("entity_id"):
+            index.add_outside(SNIPPET, row["id"], row["entity_id"])
     for row in raw["pulses"] + raw["archived pulses"]:
         add_subscription(index, row)
     return index
