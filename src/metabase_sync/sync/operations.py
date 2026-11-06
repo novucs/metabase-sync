@@ -66,7 +66,7 @@ class Ref(BaseModel):
 
 
 class Drift(Ref):
-    path: str = ""
+    path: str | None = None
     change: str
 
 

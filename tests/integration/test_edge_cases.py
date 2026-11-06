@@ -4,11 +4,13 @@ from pathlib import Path
 import pytest
 
 from metabase_sync.errors import (
+    ApiError,
+    ApplyStopped,
     ConflictError,
     NotKeptError,
-    StateError,
     ValidationFailed,
 )
+from metabase_sync.format.representations.card import Card
 from metabase_sync.format.representations.dashboard import Dashboard
 from metabase_sync.ids import new_entity_id
 from metabase_sync.metabase.client import UncertainWriteError
@@ -19,8 +21,8 @@ from metabase_sync.store.tree import read_tree
 from metabase_sync.sync import apply as executor_module
 from metabase_sync.sync import commands as workflow
 
-from ._content import unique
-from .test_roundtrip import describe
+from ._content import build_rich, unique
+from .test_roundtrip import describe, scope
 from .test_scenarios import apply, assert_clean, exported, native_card, path_of
 
 pytestmark = pytest.mark.integration
@@ -65,8 +67,50 @@ def test_a_change_metabase_silently_drops_fails_the_apply(client, mb, tmp_path):
 
     with pytest.raises(NotKeptError) as raised:
         apply(client, root)
+    _, again = workflow.plan(client, root)
 
     assert [d.entity_id for d in raised.value.items] == [rich.dashboard["entity_id"]]
+    assert [op.entity_id for op in again.operations] == [rich.dashboard["entity_id"]]
+    assert not again.drift
+
+
+def test_restoring_a_subscription_keeps_skip_if_empty(client, mb, tmp_path):
+    rich, root = exported(client, mb, tmp_path)
+    pulse = f"/api/pulse/{rich.pulse['id']}"
+    mb.put(pulse, {"skip_if_empty": True})
+    workflow.export(client, root)
+    mb.put(pulse, {"archived": True, "skip_if_empty": True})
+
+    apply(client, root, force=True)
+
+    restored = mb.get(pulse)
+    assert (restored["archived"], restored["skip_if_empty"]) == (False, True)
+    assert_clean(client, root)
+
+
+def test_a_failed_apply_records_what_it_did_and_plans_the_rest(
+    client, mb, tmp_path, monkeypatch
+):
+    rich, root = exported(client, mb, tmp_path)
+    for card in (rich.native, rich.model):
+        edit(path_of(root, card["entity_id"]), lambda d: d.update(description="new"))
+    real_put = client.put
+    refused = f"/api/card/{rich.model['id']}"
+
+    def refuse_the_model(path, body):
+        if path == refused:
+            raise ApiError("PUT", path, 400, "refused")
+        return real_put(path, body)
+
+    monkeypatch.setattr(client, "put", refuse_the_model)
+    with pytest.raises(ApplyStopped):
+        apply(client, root)
+    monkeypatch.setattr(client, "put", real_put)
+
+    _, plan = workflow.plan(client, root)
+    assert [op.entity_id for op in plan.operations] == [rich.model["entity_id"]]
+    apply(client, root)
+    assert_clean(client, root)
 
 
 def test_a_new_question_on_an_existing_dashboard_is_placed_once(client, mb, tmp_path):
@@ -118,7 +162,7 @@ def test_a_card_archived_in_the_ui_is_left_alone_and_export_takes_it(
     ]
     assert mb.get(f"/api/card/{rich.gui['id']}")["archived"] is True
     assert rich.gui["entity_id"] not in read_tree(root).entities
-    assert any("orders_per_month" in p for p in result.removed)
+    assert any("orders_per_month" in p for p in result.files.removed)
     assert_clean(client, root)
 
 
@@ -425,7 +469,7 @@ def test_a_create_still_in_flight_is_never_sent_twice(
 
     monkeypatch.setattr(client, "post", slow_post)
 
-    with pytest.raises(StateError):
+    with pytest.raises(UncertainWriteError):
         apply(client, root)
     real_post("/api/card", in_flight[0])
     apply(client, root)
@@ -477,7 +521,7 @@ def test_two_files_matching_one_item_stop_as_conflicts(client, mb, tmp_path):
 
     _, plan = workflow.plan(client, root)
 
-    assert sorted(c.path.rsplit("/", 1)[-1] for c in plan.conflicts) == [
+    assert sorted(Path(str(c.path)).name for c in plan.conflicts) == [
         "copy_a.yaml",
         "copy_b.yaml",
     ]
@@ -498,10 +542,12 @@ def test_export_before_apply_keeps_a_hand_written_file_for_an_existing_item(
 
     workflow.export(client, root)
 
-    named = [e for e in read_tree(root).entities.values() if e.name == data["name"]]
-    assert [(e.path, e.data.description) for e in named] == [
-        (hand.relative_to(root), "by hand")
+    named = [
+        (e.path, e.data.description)
+        for e in read_tree(root).entities.values()
+        if isinstance(e.data, Card) and e.name == data["name"]
     ]
+    assert named == [(hand.relative_to(root), "by hand")]
     apply(client, root)
     cards = [
         c
@@ -675,3 +721,194 @@ def test_a_new_file_without_ids_applies_and_converges(client, mb, tmp_path):
     assert_clean(client, root)
     _, after = workflow.plan(client, root)
     assert not after.drift
+
+
+def test_removal_delete_deletes_only_what_the_plan_names(client, mb, tmp_path):
+    rich = build_rich(mb)
+    home = rich.collection["id"]
+    card = mb.create_native_card(unique("Doomed card"), "SELECT 1", collection_id=home)
+    board = mb.create_dashboard(unique("Doomed board"), collection_id=home)
+    doomed = mb.create_collection(unique("Doomed"), parent_id=home)
+    inner = mb.create_native_card(
+        unique("Inner"), "SELECT 2", collection_id=doomed["id"]
+    )
+    holder = mb.create_collection(unique("Holder"), parent_id=home)
+    hidden = mb.create_native_card(
+        unique("Hidden"), "SELECT 3", collection_id=holder["id"]
+    )
+    mb.archive_card(hidden["id"])
+    root = scope(tmp_path / "root", rich.collection["entity_id"])
+    yamlio.write(
+        root / "metabase-sync.yaml",
+        {"collections": [rich.collection["entity_id"]], "removal": "delete"},
+    )
+    workflow.export(client, root)
+    for item in (card, board, inner, doomed, holder):
+        path_of(root, item["entity_id"]).unlink()
+
+    _, plan = workflow.plan(client, root, force=True)
+    apply(client, root, force=True)
+
+    deleted = [card, board, inner, doomed]
+    assert sorted(op.entity_id for op in plan.operations if op.action == "delete") == (
+        sorted(item["entity_id"] for item in deleted)
+    )
+    assert [c.entity_id for c in plan.conflicts] == [holder["entity_id"]]
+    assert hidden["name"] in plan.conflicts[0].change
+    gone = [
+        f"/api/card/{card['id']}",
+        f"/api/dashboard/{board['id']}",
+        f"/api/card/{inner['id']}",
+        f"/api/collection/{doomed['id']}",
+    ]
+    assert [mb.status(path) for path in gone] == [404] * 4
+    assert mb.status(f"/api/card/{hidden['id']}") == 200
+
+
+def test_removal_delete_keeps_subscriptions_and_timelines_it_does_not_manage(
+    client, mb, tmp_path
+):
+    rich = build_rich(mb)
+    home = rich.collection["id"]
+    board = mb.create_dashboard(unique("Watched board"), collection_id=home)
+    shown = mb.create_native_card(unique("Shown"), "SELECT 1", collection_id=home)
+    dashcard = mb.set_dashboard_contents(
+        board["id"],
+        [
+            {
+                "id": -1,
+                "card_id": shown["id"],
+                "row": 0,
+                "col": 0,
+                "size_x": 4,
+                "size_y": 4,
+            }
+        ],
+    )["dashcards"][0]
+    dated = mb.create_collection(unique("Dated"), parent_id=home)
+    root = scope(tmp_path / "root", rich.collection["entity_id"])
+    yamlio.write(
+        root / "metabase-sync.yaml",
+        {"collections": [rich.collection["entity_id"]], "removal": "delete"},
+    )
+    workflow.export(client, root)
+    pulse = mb.create_pulse(
+        board["name"],
+        dashboard_id=board["id"],
+        collection_id=None,
+        cards=[
+            {
+                "id": shown["id"],
+                "dashboard_card_id": dashcard["id"],
+                "include_csv": False,
+                "include_xls": False,
+            }
+        ],
+        channels=[
+            {
+                "channel_type": "email",
+                "enabled": True,
+                "schedule_type": "daily",
+                "schedule_hour": 8,
+                "recipients": [{"email": "someone@example.com"}],
+            }
+        ],
+    )
+    timeline = mb.post(
+        "/api/timeline", {"name": "Launches", "collection_id": dated["id"]}
+    )
+    for item in (board, dated):
+        path_of(root, item["entity_id"]).unlink()
+
+    _, plan = workflow.plan(client, root, force=True)
+    apply(client, root, force=True)
+
+    assert sorted(c.entity_id for c in plan.conflicts) == sorted(
+        [board["entity_id"], dated["entity_id"]]
+    )
+    assert not [op for op in plan.operations if op.action == "delete"]
+    kept = [
+        f"/api/dashboard/{board['id']}",
+        f"/api/pulse/{pulse['id']}",
+        f"/api/collection/{dated['id']}",
+        f"/api/timeline/{timeline['id']}",
+    ]
+    assert [mb.status(path) for path in kept] == [200] * 4
+
+
+def test_an_action_button_survives_an_update_from_the_files(client, mb, tmp_path):
+    rich = build_rich(mb)
+    database = mb.post(
+        "/api/database",
+        {
+            "engine": "postgres",
+            "name": unique("Zz actions"),
+            "details": {
+                "host": "postgres",
+                "port": 5432,
+                "dbname": "metabase",
+                "user": "metabase",
+                "password": "metabase",
+            },
+            "is_full_sync": False,
+        },
+    )
+    mb.put(
+        f"/api/database/{database['id']}",
+        {"settings": {"database-enable-actions": True}},
+    )
+    query = {
+        "database": database["id"],
+        "type": "native",
+        "native": {"query": "SELECT 1 AS x"},
+    }
+    model = mb.post(
+        "/api/card",
+        {
+            "name": unique("Actions model"),
+            "type": "model",
+            "display": "table",
+            "dataset_query": query,
+            "visualization_settings": {},
+        },
+    )
+    action = mb.post(
+        "/api/action",
+        {
+            "name": "Go",
+            "type": "query",
+            "model_id": model["id"],
+            "database_id": database["id"],
+            "dataset_query": query,
+            "parameters": [],
+            "visualization_settings": {},
+        },
+    )
+    board = mb.create_dashboard(unique("Buttons"), collection_id=rich.collection["id"])
+    mb.set_dashboard_contents(
+        board["id"],
+        [
+            {
+                "id": -1,
+                "action_id": action["id"],
+                "card_id": None,
+                "row": 0,
+                "col": 0,
+                "size_x": 4,
+                "size_y": 1,
+                "visualization_settings": {"actionDisplayType": "button"},
+            }
+        ],
+    )
+    root = scope(tmp_path / "root", rich.collection["entity_id"])
+    result = workflow.export(client, root)
+    edit(
+        path_of(root, board["entity_id"]),
+        lambda d: d["dashcards"][0].update(row=2),
+    )
+
+    apply(client, root)
+
+    dashcards = mb.get(f"/api/dashboard/{board['id']}")["dashcards"]
+    assert any("action button" in w for w in result.warnings)
+    assert [(dc["row"], dc["action_id"]) for dc in dashcards] == [(2, action["id"])]

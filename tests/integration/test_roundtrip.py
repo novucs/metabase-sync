@@ -30,7 +30,7 @@ def test_export_then_plan_is_empty(client, mb, tmp_path):
     result = workflow.export(client, root)
     _, plan = workflow.plan(client, root)
 
-    assert len(result.added) >= 9
+    assert len(result.files.added) >= 9
     assert plan.empty, describe(plan)
     assert workflow.export(client, root, check=True).clean
 

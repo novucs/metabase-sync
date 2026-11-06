@@ -16,6 +16,7 @@ ENDPOINT = "/api/dashboard"
 LISTING = {"f": "all"}
 CONTAINER = "collection_id"
 FIXED: frozenset[str] = frozenset()
+RESET_WHEN_OMITTED: frozenset[str] = frozenset()
 
 
 class TabResponse(BaseModel):
@@ -34,6 +35,7 @@ class DashcardResponse(BaseModel):
     entity_id: str
     dashboard_tab_id: int | None = None
     card_id: int | None = None
+    action_id: int | None = None
     row: int
     col: int
     size_x: int
@@ -101,6 +103,11 @@ class ContentsRequest(BaseModel):
 
 
 def read(response: Response, ids: Index) -> Dashboard:
+    if any(dashcard.action_id for dashcard in response.dashcards):
+        ids.warnings.append(
+            f"dashboard {response.name!r} has an action button, which the files "
+            "can't hold; metabase-sync doesn't manage actions"
+        )
     return Dashboard(
         name=response.name,
         entity_id=response.entity_id,

@@ -27,6 +27,9 @@ class MetabaseAdmin:
     def get(self, path: str) -> Any:
         return self._call("GET", path)
 
+    def status(self, path: str) -> int:
+        return self._http.get(self._base + path, timeout=self._timeout).status_code
+
     def post(self, path: str, json: dict[str, Any]) -> Any:
         return self._call("POST", path, json=json)
 

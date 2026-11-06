@@ -13,7 +13,7 @@ uv sync --all-groups
 ```bash
 uv run ruff check src tests
 uv run ruff format --check src tests
-uv run pyright src
+uv run pyright src tests
 uv run pytest tests --ignore=tests/integration --ignore=tests/contracts
 ```
 
@@ -39,17 +39,17 @@ uv run pytest tests/integration
 METABASE_VERSION=v0.58.39 uv run pytest tests/integration
 ```
 
-CI runs the suite on each version in the `integration` matrix of `.github/workflows/ci.yml`, which must match `TESTED` in `src/metabase_sync/metabase/client.py`. The default for local runs is in `tests/integration/docker-compose.yml`. Workers use ports 3000 to 3003; set `METABASE_PORT` to move the range. Pass `-n 0` to run on a single worker. To reuse a running instance, set `METABASE_INTEGRATION_SKIP_COMPOSE=1` with `METABASE_URL` and `METABASE_API_KEY`, and pass `-n 0`.
+CI runs the suite on each version in the `integration` matrix of `.github/workflows/ci.yml`, which must match `VERSIONS` in `src/metabase_sync/format/api/__init__.py`. The default for local runs is in `tests/integration/docker-compose.yml`. Workers use ports 3000 to 3003; set `METABASE_PORT` to move the range. Pass `-n 0` to run on a single worker. To reuse a running instance, set `METABASE_INTEGRATION_SKIP_COMPOSE=1` with `METABASE_URL` and `METABASE_API_KEY`, and pass `-n 0`.
 
 ## New Metabase versions
 
 The Canary workflow runs the integration suite against `metabase/metabase:latest` every Monday. When Metabase releases a version:
 
-1. Add its image tag to the `integration` matrix in `ci.yml`, its major version to `TESTED` in `client.py`, and to `VERSIONS` in `format/api/__init__.py`, pointing at the newest package.
+1. Add its image tag to the `integration` matrix in `ci.yml`, and its major version to `VERSIONS` in `format/api/__init__.py`, pointing at the newest package.
 2. Fix what the contract and integration tests report. A new field in the files is managed in `format/representations` or added to `LEFT_OUT`. When the API changed, add a package such as `format/api/v66` holding a full copy of each changed resource module, importing the unchanged ones from the previous package, and point the version at it.
 3. Release.
 
-When a version reaches end of life on [Metabase's support page](https://www.metabase.com/version-support), remove it from the matrix, `TESTED`, and `VERSIONS`, and delete any package no version uses.
+When a version reaches end of life on [Metabase's support page](https://www.metabase.com/version-support), remove it from the matrix and `VERSIONS`, and delete any package no version uses.
 
 ## Pull requests
 
@@ -59,6 +59,6 @@ When a version reaches end of life on [Metabase's support page](https://www.meta
 
 ## Releases
 
-1. Bump `version` in `pyproject.toml` and `__version__` in `src/metabase_sync/__init__.py`.
+1. Bump `version` in `pyproject.toml`, `__version__` in `src/metabase_sync/__init__.py`, and the pinned version in `examples/`.
 2. Move `## [Unreleased]` in `CHANGELOG.md` under a new `## [X.Y.Z] - YYYY-MM-DD` heading.
 3. Tag `vX.Y.Z` and push the tag; [`publish.yml`](.github/workflows/publish.yml) publishes to PyPI.

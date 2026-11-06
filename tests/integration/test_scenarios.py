@@ -36,13 +36,13 @@ def path_of(root: Path, entity_id: str) -> Path:
 
 def apply(client, root: Path, plan_file: Path | None = None, force: bool = False):
     done: list[tuple[str, str, str]] = []
+    prepared, result = workflow.plan_apply(client, root, plan_file, force)
     workflow.apply(
         client,
         root,
-        plan_file,
-        lambda p, r: True,
+        prepared,
+        result,
         lambda op, d: done.append((op.action, op.kind, op.name)),
-        force=force,
     )
     return done
 
@@ -158,7 +158,7 @@ def test_new_files_are_created_once_and_take_metabase_ids(client, mb, tmp_path):
     assert remote[0]["entity_id"] in local.entities
     remote_dash = mb.get(f"/api/dashboard/{rich.dashboard['id']}")
     local_dash = local.get(rich.dashboard["entity_id"])
-    assert local_dash is not None
+    assert local_dash is not None and isinstance(local_dash.data, Dashboard)
     assert {dc["entity_id"] for dc in remote_dash["dashcards"]} == {
         dc.entity_id for dc in local_dash.data.dashcards
     }
@@ -369,9 +369,7 @@ def test_an_apply_interrupted_after_a_create_resumes_without_duplicating(
 
     with pytest.raises(StateError, match="interrupted"):
         workflow.plan(client, root)
-    prepared, plan, _ = workflow.apply(
-        client, root, None, lambda p, r: True, lambda op, d: None
-    )
+    prepared, plan = workflow.plan_apply(client, root, None)
 
     assert any("interrupted apply" in note for note in prepared.notes)
     assert plan.empty, describe(plan)

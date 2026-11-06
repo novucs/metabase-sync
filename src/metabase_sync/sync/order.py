@@ -33,22 +33,36 @@ def ordered(
     operations: list[Operation], tree: LocalTree, remote: Remote
 ) -> list[Operation]:
     ops = {op.key: op for op in operations}
-    waits: dict[Key, set[str]] = {}
+    waits: dict[Key, set[Key]] = {}
     for waiter, needed in [
         *own_steps(ops),
         *referenced_items(ops, tree),
         *dashboard_contents(ops, tree),
-        *pinned_order(ops, tree),
-        *same_place_creates(ops, tree),
         *removals_last(ops, remote),
     ]:
         if needed in ops and needed != waiter:
-            waits.setdefault(waiter, set()).add(ops[needed].id)
+            waits.setdefault(waiter, set()).add(needed)
+    for waiter, needed in [*pinned_order(ops, tree), *same_place_creates(ops, tree)]:
+        if waiter not in waited_on(waits, needed):
+            waits.setdefault(waiter, set()).add(needed)
     with_deps = [
-        op.model_copy(update={"depends_on": sorted(waits.get(op.key, set()))})
+        op.model_copy(
+            update={"depends_on": sorted(ops[k].id for k in waits.get(op.key, ()))}
+        )
         for op in operations
     ]
     return [op for stage in stages(with_deps) for op in stage]
+
+
+def waited_on(waits: dict[Key, set[Key]], start: Key) -> set[Key]:
+    found: set[Key] = set()
+    pending = [start]
+    while pending:
+        for needed in waits.get(pending.pop(), ()):
+            if needed not in found:
+                found.add(needed)
+                pending.append(needed)
+    return found
 
 
 def own_steps(ops: dict[Key, Operation]) -> Iterator[Edge]:

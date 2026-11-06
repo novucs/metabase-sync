@@ -4,7 +4,12 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from metabase_sync.errors import ApiError, StateError, describe
+from metabase_sync.errors import (
+    ApiError,
+    StateError,
+    UnresolvedReferenceError,
+    describe,
+)
 from metabase_sync.format.representations import Item
 from metabase_sync.metabase.client import MetabaseClient
 from metabase_sync.metabase.index import Index, RemoteItem, with_detail
@@ -48,4 +53,10 @@ class Remote:
             raise StateError(
                 f"Metabase returned {kind} {raw.get('id')} in a shape "
                 f"metabase-sync can't read: {problems}"
+            ) from error
+        except UnresolvedReferenceError as error:
+            raise StateError(
+                f"Can't read {kind} {raw.get('id')} {raw.get('name')!r} from "
+                f"Metabase: {error}",
+                hint=error.hint,
             ) from error

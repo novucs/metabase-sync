@@ -7,6 +7,7 @@ from metabase_sync.format.representations import (
     COMPARED_WHEN_PRESENT,
     DASHBOARD,
     KINDS,
+    SUBSCRIPTION,
 )
 from metabase_sync.format.representations.card import Card
 from metabase_sync.metabase.index import RemoteItem
@@ -70,13 +71,13 @@ def _compare_one(
     local = representations.comparable(entity.data)
     hit = remote.index.find(eid)
     item = hit[1] if hit else None
-    theirs = (
-        remote_view(representations.comparable(remote.item(*hit)), local)
-        if hit
-        else None
-    )
+    full = representations.comparable(remote.item(*hit)) if hit else {}
+    theirs = remote_view(full, local) if hit else None
     live = item is not None and not item.archived
-    state = classify(tree.prior(eid), digest(local), digest(theirs) if live else None)
+    prior = tree.prior(eid)
+    state = classify(
+        prior, digest(local), remote_hash(prior, full, local) if live else None
+    )
 
     def operation(action: str, **fields: Any) -> Operation:
         return Operation(
@@ -89,7 +90,26 @@ def _compare_one(
             **fields,
         )
 
-    if hit is not None and eid not in tree.managed:
+    def drift(change: str) -> Drift:
+        return Drift(
+            kind=entity.kind,
+            entity_id=eid,
+            name=tree.label(entity),
+            path=path,
+            change=change,
+        )
+
+    if hit is None and remote.index.is_outside(eid):
+        compared.conflicts.append(
+            drift(
+                "lost its channels, or its dashboard moved out of the managed "
+                "collections, in Metabase"
+                if entity.kind == SUBSCRIPTION
+                else "moved out of the managed collections in Metabase"
+            )
+        )
+        return
+    if hit is not None and eid not in tree.state:
         compared.operations.append(operation(IMPORT))
     if state == SAME:
         return
@@ -100,14 +120,8 @@ def _compare_one(
                 if state == CONFLICT
                 else render_diff(local, theirs, path or "files", "metabase")
             )
-        drift = Drift(
-            kind=entity.kind,
-            entity_id=eid,
-            name=tree.label(entity),
-            path=path or "",
-            change=_change(item, state),
-        )
-        (compared.conflicts if state == CONFLICT else compared.drift).append(drift)
+        found = drift(_change(item, state == CONFLICT))
+        (compared.conflicts if state == CONFLICT else compared.drift).append(found)
         if not force:
             return
 
@@ -115,13 +129,9 @@ def _compare_one(
     if theirs is None:
         if ambiguous:
             compared.conflicts.append(
-                Drift(
-                    kind=entity.kind,
-                    entity_id=eid,
-                    name=tree.label(entity),
-                    path=path or "",
-                    change="can't be matched to one item in Metabase by name; set "
-                    "its entity_id to import one, or pass --force to create it",
+                drift(
+                    "can't be matched to one item in Metabase by name; set its "
+                    "entity_id to import one, or pass --force to create it"
                 )
             )
             if not force:
@@ -133,7 +143,11 @@ def _compare_one(
             eid, render_diff(theirs, local, "metabase", path or "files")
         )
     if item is not None and item.archived:
-        compared.operations.append(operation(RESTORE, remote_hash=digest(theirs)))
+        compared.operations.append(
+            operation(
+                RESTORE, remote_hash=digest(theirs), reason="archived in Metabase"
+            )
+        )
     for part in parts:
         before = part_view(entity.kind, part, theirs)
         changes = changed_fields(before, part_view(entity.kind, part, local))
@@ -189,31 +203,37 @@ def not_kept(tree: LocalTree, remote: Remote, entity_ids: set[str]) -> list[Drif
                     kind=entity.kind,
                     entity_id=eid,
                     name=tree.label(entity),
-                    path=str(entity.path) if entity.path else "",
+                    path=str(entity.path) if entity.path else None,
                     change=", ".join(missing),
                 )
             )
     return dropped
 
 
-def _change(item: RemoteItem | None, state: str) -> str:
+def _change(item: RemoteItem | None, conflict: bool) -> str:
     if item is None:
-        change = "deleted in Metabase"
-    elif item.archived:
-        change = "archived in Metabase"
-    else:
-        change = "changed in Metabase"
-    if state != CONFLICT:
-        return change
-    if change == "changed in Metabase":
-        return "changed here and in Metabase"
-    return f"changed here, {change}"
+        return (
+            "changed here, deleted in Metabase" if conflict else "deleted in Metabase"
+        )
+    if item.archived:
+        return (
+            "changed here, archived in Metabase" if conflict else "archived in Metabase"
+        )
+    return "changed here and in Metabase" if conflict else "changed in Metabase"
 
 
 def remote_view(remote: dict[str, Any], local: dict[str, Any]) -> dict[str, Any]:
     return {
         k: v for k, v in remote.items() if k not in COMPARED_WHEN_PRESENT or k in local
     }
+
+
+def remote_hash(
+    prior: str | None, remote: dict[str, Any], local: dict[str, Any]
+) -> str:
+    seen = digest(remote_view(remote, local))
+    unchanged = prior in (digest(remote), digest(remote_view(remote, {})))
+    return prior if prior is not None and unchanged and seen != digest(local) else seen
 
 
 def changed_fields(before: dict[str, Any], after: dict[str, Any]) -> list[str]:

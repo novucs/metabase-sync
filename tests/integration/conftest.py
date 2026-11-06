@@ -117,5 +117,6 @@ def reversed_levels(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def client(metabase_url_and_key: tuple[str, str]) -> Iterator[MetabaseClient]:
     url, key = metabase_url_and_key
-    with MetabaseClient(Settings(url=url, api_key=key)) as c:
+    settings = Settings.model_validate({"url": url, "api_key": key})
+    with MetabaseClient(settings) as c:
         yield c

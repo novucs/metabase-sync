@@ -13,12 +13,19 @@ from metabase_sync.format.representations import (
     SUBSCRIPTION,
 )
 from metabase_sync.format.representations.card import Card
-from metabase_sync.format.representations.dashboard import Dashboard
+from metabase_sync.format.representations.dashboard import Dashboard, Dashcard
 from metabase_sync.format.representations.subscription import Subscription
+from metabase_sync.metabase.client import MetabaseClient
 from metabase_sync.metabase.index import Index
+from metabase_sync.metabase.metadata import Metadata
 from metabase_sync.metabase.remote import Remote
+from metabase_sync.settings import Settings
+from metabase_sync.store import yamlio
+from metabase_sync.store.journal import Journal, Posting, Started
 from metabase_sync.store.state import Managed
-from metabase_sync.store.tree import Entity, LocalTree
+from metabase_sync.store.tree import CONFIG, Entity, LocalTree, render, write_tree
+from metabase_sync.sync import commands as workflow
+from metabase_sync.sync.apply import reconcile
 from metabase_sync.sync.operations import local_hash
 from metabase_sync.sync.order import stages
 from metabase_sync.sync.plan import build_plan
@@ -29,7 +36,12 @@ def eid(tag: str) -> str:
 
 
 def remote(**items: list[dict[str, Any]]) -> Index:
-    index = Index(version="v0.64.4", metadata=None, databases={1: "Warehouse"})  # type: ignore[arg-type]
+    databases = {"Warehouse": [1]}
+    index = Index(
+        version="v0.64.4",
+        metadata=Metadata(offline_client(), databases),
+        databases=databases,
+    )
     for kind, entries in items.items():
         for entry in entries:
             index.add(kind, entry)
@@ -38,6 +50,12 @@ def remote(**items: list[dict[str, Any]]) -> Index:
 
 def connected(index: Index) -> Remote:
     return Remote(index=index, api=v58)
+
+
+def offline_client() -> MetabaseClient:
+    return MetabaseClient(
+        Settings.model_validate({"url": "http://mb.test", "api_key": "k"})
+    )
 
 
 def card(id_: int, tag: str, collection: int | None, **extra: Any) -> dict[str, Any]:
@@ -128,7 +146,7 @@ def test_removing_a_collection_that_holds_unmanaged_items_stops_until_forced():
 
     assert held.empty
     assert [(c.entity_id, c.change) for c in held.conflicts] == [
-        (eid("b"), "removed here, but holds 1 item that is not in the files")
+        (eid("b"), "removed here, but holds card 'card c', which is not in the files")
     ]
     assert [op.entity_id for op in forced.operations] == [eid("b")]
     assert [c.entity_id for c in forced.cascaded] == [eid("c")]
@@ -232,6 +250,17 @@ def test_a_new_subscription_imports_only_one_with_the_same_channels(channel, act
     actions = [op.action for op in plan_for(index, local).operations]
 
     assert actions[0] == action
+
+
+def test_a_dashboard_whose_subscription_was_archived_can_be_deleted():
+    index = board_with_slack_subscription()
+    index.add(SUBSCRIPTION, {**index.raw[SUBSCRIPTION, 30], "archived": True})
+    local = local_from(index, [(COLLECTION, 1)], {eid("a"), eid("b")})
+
+    plan = build_plan(local, connected(index), removal="delete")
+
+    assert not plan.conflicts
+    assert [(op.action, op.kind) for op in plan.operations] == [("delete", "dashboard")]
 
 
 def test_an_archived_item_with_a_file_is_restored_never_recreated():
@@ -415,6 +444,38 @@ def test_new_pinned_items_are_created_in_their_pinned_order():
     )
 
 
+def test_a_pinned_question_on_a_card_pinned_after_it_is_created_after_that_card():
+    index = remote(collection=[collection(1, "a")])
+    local = local_from(index, [(COLLECTION, 1)], {eid("a")})
+    for tag, pin, stage in (
+        ("m", 2, {"lib/type": "mbql.stage/native", "native": "SELECT 1"}),
+        ("q", 1, {"lib/type": "mbql.stage/mbql", "source-card": eid("m")}),
+    ):
+        local.entities[eid(tag)] = Entity(
+            kind=CARD,
+            data=Card(
+                name=f"card {tag}",
+                entity_id=eid(tag),
+                collection_id=eid("a"),
+                collection_position=pin,
+                display="table",
+                dataset_query={
+                    "lib/type": "mbql/query",
+                    "database": "Warehouse",
+                    "stages": [stage],
+                },
+                visualization_settings={},
+            ),
+            path=Path(f"card_{tag}.yaml"),
+        )
+
+    order = [op.id for op in plan_for(index, local).operations]
+
+    assert order.index(f"{eid('m')}:base:create") < order.index(
+        f"{eid('q')}:base:create"
+    )
+
+
 def test_items_that_need_each_other_first_are_reported_not_crashed_on():
     index = remote(collection=[collection(1, "a")])
     local = local_from(index, [(COLLECTION, 1)], {eid("a")})
@@ -532,16 +593,25 @@ def test_removing_a_file_whose_item_changed_in_metabase_is_a_conflict():
     assert [c.change for c in plan.conflicts] == ["removed here, changed in Metabase"]
 
 
-def test_removing_a_model_written_without_its_columns_archives_it():
-    index = remote(
+def model_index() -> Index:
+    return remote(
         collection=[collection(1, "a")],
         card=[card(10, "c", 1, type="model", result_metadata=[{"name": "ID"}])],
     )
+
+
+def written_without_columns(index: Index) -> LocalTree:
     local = managed_tree(index)
     edit(local, "c", result_metadata=None)
     local.state[eid("c")] = Managed(
         kind="card", hash=local_hash(local.entities[eid("c")])
     )
+    return local
+
+
+def test_removing_a_model_written_without_its_columns_archives_it():
+    index = model_index()
+    local = written_without_columns(index)
     del local.entities[eid("c")]
 
     plan = plan_for(index, local)
@@ -550,6 +620,35 @@ def test_removing_a_model_written_without_its_columns_archives_it():
     assert [(op.action, op.entity_id) for op in plan.operations] == [
         ("archive", eid("c"))
     ]
+
+
+def test_dropping_a_models_columns_from_its_file_is_not_a_conflict():
+    index = model_index()
+    local = managed_tree(index)
+    edit(local, "c", result_metadata=None, description="edited in the files")
+
+    plan = plan_for(index, local)
+
+    assert not plan.conflicts
+    assert [(op.action, op.changes) for op in plan.operations] == [
+        ("update", ["description"])
+    ]
+
+
+def test_export_keeps_an_edit_to_a_model_written_without_its_columns(
+    tmp_path, monkeypatch
+):
+    index = model_index()
+    local = written_without_columns(index)
+    edit(local, "c", description="edited in the files")
+    yamlio.write(tmp_path / CONFIG, {})
+    write_tree(tmp_path, render(list(local.entities.values())), local.state, {})
+    monkeypatch.setattr(workflow, "connect", lambda *args: connected(index))
+
+    result = workflow.export(offline_client(), tmp_path)
+
+    assert not result.conflicts
+    assert result.kept == ["collections/main/coll_a/card_c.yaml"]
 
 
 def test_removing_the_dashcard_a_filter_sits_on_asks_to_remove_the_filter_too():
@@ -589,13 +688,27 @@ def test_removing_the_dashcard_a_filter_sits_on_asks_to_remove_the_filter_too():
 def test_an_item_deleted_in_metabase_is_not_recreated():
     index = remote(collection=[collection(1, "a")], card=[card(10, "c", 1)])
     local = managed_tree(index)
-    del index.items[CARD][10]
-    del index._by_eid[eid("c")]
+    index.forget(CARD, 10)
 
     plan = plan_for(index, local)
 
     assert plan.empty
     assert [d.change for d in plan.drift] == ["deleted in Metabase"]
+
+
+def test_an_item_moved_out_of_the_managed_collections_is_never_recreated():
+    index = remote(collection=[collection(1, "a")], card=[card(10, "c", 1)])
+    local = managed_tree(index)
+    index.forget(CARD, 10)
+    index.add_outside(CARD, 10, eid("c"))
+
+    held = plan_for(index, local)
+    forced = plan_for(index, local, force=True)
+
+    assert [(c.entity_id, c.change) for c in held.conflicts] == [
+        (eid("c"), "moved out of the managed collections in Metabase")
+    ]
+    assert held.empty and forced.empty
 
 
 def test_the_fingerprint_changes_when_a_file_changes_after_planning():
@@ -641,6 +754,36 @@ def test_a_file_reusing_the_entity_id_of_another_kind_is_refused():
     assert "belongs to a collection" in raised.value.problems[0]
 
 
+def test_references_that_exist_nowhere_are_refused_before_applying():
+    index = remote(
+        collection=[collection(1, "a")],
+        dashboard=[
+            {"id": 20, "entity_id": eid("b"), "name": "board", "collection_id": 1}
+        ],
+    )
+    local = local_from(index, [(COLLECTION, 1), (DASHBOARD, 20)], {eid("a"), eid("b")})
+    edit(
+        local,
+        "b",
+        collection_id=eid("x"),
+        dashcards=[
+            Dashcard(
+                entity_id=eid("d"), card_id=eid("y"), row=0, col=0, size_x=4, size_y=4
+            )
+        ],
+    )
+
+    with pytest.raises(ValidationFailed) as raised:
+        build_plan(local, connected(index), scope={eid("a")})
+
+    assert [p.split(": ", 1)[1] for p in raised.value.problems] == [
+        f"collection_id refers to collection {eid('x')}, which doesn't exist in the "
+        + "files or in Metabase",
+        f"dashcards refers to card {eid('y')}, which doesn't exist in the files or "
+        + "in Metabase",
+    ]
+
+
 def test_new_items_with_the_same_name_and_place_are_created_one_at_a_time():
     index = remote(collection=[collection(1, "a")])
     local = local_from(index, [(COLLECTION, 1)], {eid("a")})
@@ -664,3 +807,70 @@ def test_new_items_with_the_same_name_and_place_are_created_one_at_a_time():
         [eid("p")],
         [eid("q")],
     ]
+
+
+class NothingCreatedYet(MetabaseClient):
+    def __init__(self) -> None:
+        super().__init__(
+            Settings.model_validate({"url": "http://mb.test", "api_key": "k"})
+        )
+        self.requested: list[str] = []
+
+    def get(self, path: str, **params: str) -> object:
+        self.requested.append(path)
+        return []
+
+
+def test_recovery_lists_each_kind_once(tmp_path):
+    journal = Journal(tmp_path)
+    for tag in "pq":
+        journal.record(
+            Posting(
+                op=f"{eid(tag)}:base:create",
+                kind=CARD,
+                entity_id=eid(tag),
+                name=tag,
+                container=None,
+                existing=[],
+            )
+        )
+    client = NothingCreatedYet()
+
+    reconcile(client, v58, journal, LocalTree(root=tmp_path))
+
+    assert client.requested == ["/api/card"]
+
+
+def test_a_create_that_lands_after_recovery_is_imported_not_duplicated(tmp_path):
+    index = remote(collection=[collection(1, "a")])
+    local = local_from(index, [(COLLECTION, 1)], {eid("a")})
+    local.root = tmp_path
+    local.entities[eid("n")] = Entity(
+        kind=CARD,
+        data=Card(
+            name="slow",
+            entity_id=eid("n"),
+            collection_id=eid("a"),
+            display="table",
+            dataset_query={},
+            visualization_settings={},
+        ),
+        path=Path("slow.yaml"),
+    )
+    journal = Journal(tmp_path)
+    op = f"{eid('n')}:base:create"
+    journal.record(
+        Started(op=op, action="create", kind=CARD, entity_id=eid("n"), name="slow")
+    )
+    journal.record(
+        Posting(
+            op=op, kind=CARD, entity_id=eid("n"), name="slow", container=1, existing=[]
+        )
+    )
+
+    reconcile(NothingCreatedYet(), v58, journal, local)
+    index.add(CARD, card(10, "c", 1, name="slow"))
+    plan = plan_for(index, local)
+
+    assert plan.renames == {eid("n"): eid("c")}
+    assert "create" not in [op.action for op in plan.operations]

@@ -35,51 +35,63 @@ class Located(BaseModel):
 
 
 class Metadata:
-    def __init__(self, client: MetabaseClient, databases: dict[int, str]) -> None:
+    def __init__(self, client: MetabaseClient, databases: dict[str, list[int]]) -> None:
         self._client = client
         self._databases = databases
         self._lock = threading.Lock()
         self._loaded: set[int] = set()
+        self._looked_up: set[str] = set()
         self._table_by_id: dict[int, TableRef] = {}
         self._table_id_by_ref: dict[TableRef, int] = {}
         self._field_by_id: dict[int, FieldRef] = {}
         self._field_id_by_ref: dict[FieldRef, int] = {}
 
     def table_ref(self, table_id: int) -> list[Any]:
-        if table_id not in self._table_by_id:
-            self._load_for(f"/api/table/{table_id}", f"table id {table_id}")
+        path = f"/api/table/{table_id}"
+        if table_id not in self._table_by_id and path not in self._looked_up:
+            self._load_for(path, f"table id {table_id}")
         if table_id not in self._table_by_id:
             raise UnresolvedReferenceError(f"table id {table_id} not found")
         return list(self._table_by_id[table_id])
 
     def table_id(self, ref: list[Any]) -> int:
         key = (ref[0], ref[1], ref[2])
-        self._load(self._database_id(ref[0]))
+        self._load(self.database_id(ref[0]))
         if key not in self._table_id_by_ref:
             raise UnresolvedReferenceError(f"table {list(key)} not found")
         return self._table_id_by_ref[key]
 
     def field_ref(self, field_id: int) -> list[Any]:
-        if field_id not in self._field_by_id:
-            self._load_for(f"/api/field/{field_id}", f"field id {field_id}")
+        path = f"/api/field/{field_id}"
+        if field_id not in self._field_by_id and path not in self._looked_up:
+            self._load_for(path, f"field id {field_id}")
         if field_id not in self._field_by_id:
             raise UnresolvedReferenceError(f"field id {field_id} not found")
         return list(self._field_by_id[field_id])
 
     def field_id(self, ref: list[Any]) -> int:
         key = tuple(ref)
-        self._load(self._database_id(ref[0]))
+        self._load(self.database_id(ref[0]))
         if key not in self._field_id_by_ref:
             raise UnresolvedReferenceError(f"field {list(key)} not found")
         return self._field_id_by_ref[key]
 
-    def _database_id(self, name: str) -> int:
-        for database_id, database in self._databases.items():
-            if database == name:
-                return database_id
-        raise UnresolvedReferenceError(f"database {name!r} not found in Metabase")
+    def database_id(self, name: str) -> int:
+        found = self._databases.get(name, [])
+        if len(found) > 1:
+            raise UnresolvedReferenceError(
+                f"{len(found)} databases in Metabase are named {name!r}",
+                hint="Rename one of them in Metabase so the files can tell them apart",
+            )
+        if not found:
+            raise UnresolvedReferenceError(
+                f"database {name!r} not found in Metabase",
+                hint="Database names must match the Metabase admin database list",
+            )
+        return found[0]
 
     def _load_for(self, path: str, what: str) -> None:
+        self._looked_up.add(path)
         located = self._located(path, what)
         if located.db_id is None:
             located = located.table or self._located(
@@ -103,7 +115,7 @@ class Metadata:
                 return
             meta = DatabaseMeta.model_validate(
                 self._client.get(
-                    f"/api/database/{db_id}/metadata", include_hidden=True
+                    f"/api/database/{db_id}/metadata", include_hidden="true"
                 ),
                 extra="ignore",
             )

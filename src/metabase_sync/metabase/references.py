@@ -36,7 +36,7 @@ def portable(value: Any, index: Index) -> Any:
         if type(ref) is not int:
             return ref
         if kind == DATABASE:
-            return index.database_name(ref)
+            return index.lenient(index.database_name, ref, "database id")
         if kind == TABLE:
             return index.lenient(index.metadata.table_ref, ref, "table id")
         if kind == FIELD:
@@ -49,7 +49,7 @@ def portable(value: Any, index: Index) -> Any:
 def native(value: Any, index: Index) -> Any:
     def resolve(kind: str, ref: Any) -> Any:
         if kind == DATABASE:
-            return index.database_id(ref) if isinstance(ref, str) else ref
+            return index.metadata.database_id(ref) if isinstance(ref, str) else ref
         if kind == TABLE:
             return index.metadata.table_id(ref) if isinstance(ref, list) else ref
         if kind == FIELD:

@@ -8,4 +8,4 @@ class Snippet(BaseModel):
     entity_id: EntityId
     description: str | None = None
     creator_id: str | None = None
-    content: str = Field(min_length=1)
+    content: str

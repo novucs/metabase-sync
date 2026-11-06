@@ -6,7 +6,7 @@ from typing import Any, Self
 
 import requests
 from requests.adapters import HTTPAdapter
-from urllib3.exceptions import ConnectTimeoutError, MaxRetryError
+from urllib3.exceptions import ConnectTimeoutError, MaxRetryError, ReadTimeoutError
 from urllib3.util.retry import Retry
 
 from metabase_sync.errors import ApiError, MetabaseSyncError, UnsupportedVersionError
@@ -14,7 +14,6 @@ from metabase_sync.settings import Settings
 
 log = logging.getLogger(__name__)
 
-TESTED = (58, 64, 65)
 UNCERTAIN_STATUSES = {502, 503, 504}
 AUTH_HINTS = {
     401: "Check that METABASE_API_KEY (or METABASE_HEADERS) is valid for this Metabase",
@@ -26,12 +25,9 @@ class UncertainWriteError(MetabaseSyncError):
     pass
 
 
-def _never_sent(error: requests.RequestException) -> bool:
+def _reason(error: requests.RequestException) -> object:
     cause = error.args[0] if error.args else None
-    return isinstance(error, requests.ConnectTimeout) or (
-        isinstance(cause, MaxRetryError)
-        and isinstance(cause.reason, ConnectTimeoutError)
-    )
+    return cause.reason if isinstance(cause, MaxRetryError) else cause
 
 
 class MetabaseClient:
@@ -63,8 +59,8 @@ class MetabaseClient:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def get(self, path: str, **params: Any) -> Any:
-        return self._send("GET", path, params=_params(params))
+    def get(self, path: str, **params: str) -> Any:
+        return self._send("GET", path, params=params)
 
     def put(self, path: str, body: dict[str, Any]) -> Any:
         return self._send("PUT", path, json=body)
@@ -82,10 +78,17 @@ class MetabaseClient:
         with ThreadPoolExecutor(max_workers=self.settings.concurrency) as pool:
             return list(pool.map(fn, items))
 
-    def version(self) -> tuple[int, int, str]:
-        tag = (self.get("/api/session/properties").get("version") or {}).get(
-            "tag"
-        ) or ""
+    @cached_property
+    def supported_version(self) -> tuple[int, str]:
+        try:
+            properties = self.get("/api/session/properties")
+        except ApiError as error:
+            if error.status == 404:
+                error.hint = (
+                    "Set METABASE_URL to the address you open Metabase at, without /api"
+                )
+            raise
+        tag = (properties.get("version") or {}).get("tag") or ""
         parts = tag.lstrip("v").split(".")
         try:
             edition, minor = int(parts[0]), int(parts[1])
@@ -95,23 +98,6 @@ class MetabaseClient:
             ) from e
         if edition not in (0, 1):
             raise UnsupportedVersionError(f"Unknown Metabase version {tag!r}")
-        return 0, minor, tag
-
-    @cached_property
-    def supported_version(self) -> tuple[int, str]:
-        _, minor, tag = self.version()
-        oldest = TESTED[0]
-        if minor < oldest:
-            raise UnsupportedVersionError(
-                f"Metabase {tag} is older than 0.{oldest} (1.{oldest} for Enterprise)",
-                hint="Use metabase-sync 0.3.x for Metabase 0.55 to 0.57",
-            )
-        if minor not in TESTED:
-            log.warning(
-                "Metabase %s is untested; metabase-sync is tested on %s",
-                tag,
-                ", ".join(f"0.{v}" for v in TESTED),
-            )
         return minor, tag
 
     def _send(
@@ -120,26 +106,42 @@ class MetabaseClient:
         is_create = method == "POST" and not read_only
         try:
             response = self._http.request(
-                method, self._base + path, timeout=self.settings.timeout, **kwargs
+                method,
+                self._base + path,
+                timeout=self.settings.timeout,
+                allow_redirects=False,
+                **kwargs,
             )
         except requests.RequestException as e:
-            if is_create and not _never_sent(e):
+            reason = _reason(e)
+            never_sent = isinstance(e, requests.ConnectTimeout) or isinstance(
+                reason, ConnectTimeoutError
+            )
+            if is_create and not never_sent:
                 raise UncertainWriteError(
                     f"{method} {path}: outcome unknown ({e})"
                 ) from e
-            if _never_sent(e):
+            if never_sent:
                 raise MetabaseSyncError(
                     f"Can't reach Metabase at {self._base}",
                     hint="Check METABASE_URL, and that Metabase is running and reachable",
                 ) from e
-            if isinstance(e, requests.Timeout):
+            if isinstance(e, requests.Timeout) or isinstance(reason, ReadTimeoutError):
                 raise MetabaseSyncError(
                     f"Metabase took longer than {self.settings.timeout:g}s to answer {method} {path}",
                     hint="Raise METABASE_TIMEOUT if Metabase is slow",
                 ) from e
             raise MetabaseSyncError(
-                f"Lost the connection to Metabase during {method} {path}"
+                f"Lost the connection to Metabase during {method} {path}: {reason}",
+                hint="Check that Metabase is running, then run the command again",
             ) from e
+        log.info("%s %s %s", method, path, response.status_code)
+        if response.is_redirect:
+            raise MetabaseSyncError(
+                f"Metabase redirected {method} {path} to "
+                f"{response.headers['Location']}",
+                hint="Set METABASE_URL to the address it redirects to",
+            )
         if is_create and response.status_code in UNCERTAIN_STATUSES:
             raise UncertainWriteError(
                 f"{method} {path}: outcome unknown (HTTP {response.status_code})"
@@ -154,15 +156,6 @@ class MetabaseClient:
         if not response.content:
             return None
         return response.json()
-
-
-def _params(params: dict[str, Any]) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for key, value in params.items():
-        if value is None:
-            continue
-        out[key] = str(value).lower() if isinstance(value, bool) else value
-    return out
 
 
 def _error_text(response: requests.Response) -> str:

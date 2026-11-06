@@ -6,11 +6,12 @@ from metabase_sync.format.representations import (
     COLLECTION,
     DASHBOARD,
     KINDS,
+    SUBSCRIPTION,
 )
 from metabase_sync.metabase.index import Index, RemoteItem
 from metabase_sync.metabase.remote import Remote
 from metabase_sync.store.tree import LocalTree
-from metabase_sync.sync.compare import remote_view
+from metabase_sync.sync.compare import remote_hash
 from metabase_sync.sync.operations import (
     ARCHIVE,
     CONFLICT,
@@ -23,6 +24,7 @@ from metabase_sync.sync.operations import (
 )
 
 DELETABLE = (CARD, DASHBOARD, COLLECTION)
+TIMELINE = "timeline"
 
 
 @dataclass
@@ -42,33 +44,40 @@ def removals(
     index = remote.index
     removed = Removed()
     removing: dict[str, tuple[str, RemoteItem]] = {}
-    for eid in sorted(tree.managed - set(tree.entities)):
+    for eid in sorted(tree.state.keys() - tree.entities.keys()):
         hit = index.find(eid)
         if hit is None or hit[1].archived:
             continue
         kind, item = hit
-        if classify(tree.prior(eid), None, remote_hash(tree, remote, eid)) == CONFLICT:
+        prior = tree.prior(eid)
+        theirs = representations.comparable(remote.item(kind, item))
+        if classify(prior, None, remote_hash(prior, theirs, {})) == CONFLICT:
             removed.conflicts.append(_drift(kind, eid, item, "changed in Metabase"))
             if not force:
                 continue
-        swept = swept_along(tree, index, kind, item)
+        swept = [] if removal == DELETE else swept_along(tree, index, kind, item)
         if swept:
-            held = (
-                "1 item that is" if len(swept) == 1 else f"{len(swept)} items that are"
-            )
+            names = ", ".join(f"{ref.kind} {ref.name!r}" for ref in swept)
+            verb = "is" if len(swept) == 1 else "are"
             removed.conflicts.append(
-                _drift(kind, eid, item, f"but holds {held} not in the files")
+                _drift(
+                    kind, eid, item, f"but holds {names}, which {verb} not in the files"
+                )
             )
             if not force:
                 continue
             removed.cascaded += swept
         removing[eid] = hit
+    if removal == DELETE:
+        removed.conflicts += kept_by_deletes(index, removing)
 
     collections = {item.id for kind, item in removing.values() if kind == COLLECTION}
     dashboards = {item.id for kind, item in removing.values() if kind == DASHBOARD}
     for eid, (kind, item) in removing.items():
         inside = set(collection_chain(index, item.collection(kind)))
-        if inside & collections or (kind == CARD and item.dashboard_id in dashboards):
+        if removal != DELETE and (
+            inside & collections or (kind == CARD and item.dashboard_id in dashboards)
+        ):
             removed.cascaded.append(Ref(kind=kind, entity_id=eid, name=item.name))
             continue
         action = DELETE if removal == DELETE and kind in DELETABLE else ARCHIVE
@@ -122,34 +131,74 @@ def revived(
     return found
 
 
+def held(index: Index, kind: str, item: RemoteItem) -> list[tuple[str, RemoteItem]]:
+    if kind == DASHBOARD:
+        inside = [(CARD, c) for c in index.all(CARD) if c.dashboard_id == item.id]
+        dashboards = {item.id}
+    elif kind == COLLECTION:
+        inside = [
+            (inner_kind, inner)
+            for inner_kind in (COLLECTION, CARD, DASHBOARD)
+            for inner in index.all(inner_kind)
+            if item.id in collection_chain(index, inner.collection(inner_kind))
+        ] + [
+            (TIMELINE, timeline)
+            for timeline in index.timelines
+            if item.id in collection_chain(index, timeline.collection_id)
+        ]
+        dashboards = {
+            inner.id for inner_kind, inner in inside if inner_kind == DASHBOARD
+        }
+    else:
+        return []
+    return inside + [
+        (SUBSCRIPTION, pulse)
+        for pulse in index.all(SUBSCRIPTION)
+        if pulse.dashboard_id in dashboards and not pulse.archived
+    ]
+
+
 def swept_along(
     tree: LocalTree, index: Index, kind: str, item: RemoteItem
 ) -> list[Ref]:
-    if kind not in (COLLECTION, DASHBOARD):
-        return []
-    swept = []
-    for inner_kind in (COLLECTION, CARD, DASHBOARD):
-        for inner in index.live(inner_kind):
-            eid = inner.entity_id
-            if not eid or eid in tree.managed or eid in tree.entities:
-                continue
-            inside = (
-                item.id in collection_chain(index, inner.collection(inner_kind))
-                if kind == COLLECTION
-                else inner_kind == CARD and inner.dashboard_id == item.id
-            )
-            if inside:
-                swept.append(Ref(kind=inner_kind, entity_id=eid, name=inner.name))
-    return swept
+    return [
+        Ref(kind=inner_kind, entity_id=inner.entity_id, name=inner.name)
+        for inner_kind, inner in held(index, kind, item)
+        if inner_kind in DELETABLE
+        and inner.entity_id
+        and not inner.archived
+        and inner.entity_id not in tree.state
+        and inner.entity_id not in tree.entities
+    ]
 
 
-def remote_hash(tree: LocalTree, remote: Remote, eid: str) -> str | None:
-    hit = remote.index.find(eid)
-    if hit is None:
-        return None
-    theirs = representations.comparable(remote.item(*hit))
-    bare = digest(remote_view(theirs, {}))
-    return bare if bare == tree.prior(eid) else digest(theirs)
+def kept_by_deletes(
+    index: Index, removing: dict[str, tuple[str, RemoteItem]]
+) -> list[Drift]:
+    conflicts: list[Drift] = []
+    stable = False
+    while not stable:
+        stable = True
+        for eid, (kind, item) in list(removing.items()):
+            kept = [
+                f"{inner_kind} {inner.name!r}"
+                for inner_kind, inner in held(index, kind, item)
+                if inner.entity_id not in removing
+            ]
+            if kept:
+                del removing[eid]
+                stable = False
+                conflicts.append(
+                    _drift(
+                        kind,
+                        eid,
+                        item,
+                        f"but deleting it would also delete {', '.join(kept)}, which "
+                        "this plan doesn't delete (archived items count); use "
+                        "`removal: archive` to archive it instead",
+                    )
+                )
+    return conflicts
 
 
 def collection_chain(index: Index, collection_id: int | None) -> list[int]:

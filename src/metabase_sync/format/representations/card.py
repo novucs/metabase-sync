@@ -1,8 +1,12 @@
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 
-from metabase_sync.format.representations.content import sort_keys, stable_uuids
+from metabase_sync.format.representations.content import (
+    SortedKeys,
+    sort_keys,
+    stable_uuids,
+)
 from metabase_sync.ids import EntityId
 
 AUTHORED = (
@@ -19,16 +23,11 @@ class ResultColumn(BaseModel):
     description: str | None = None
     display_name: str | None = None
     effective_type: str | None = None
-    field_ref: list[Any] | None = None
+    field_ref: SortedKeys[list[Any] | None] = None
     fk_target_field_id: list[Any] | int | None = None
     semantic_type: str | None = None
-    settings: dict[str, Any] | None = None
+    settings: SortedKeys[dict[str, Any] | None] = None
     visibility_type: str | None = None
-
-    @field_validator("field_ref", "settings")
-    @classmethod
-    def sorted_keys(cls, value: Any) -> Any:
-        return sort_keys(value)
 
 
 class Card(BaseModel):
@@ -49,13 +48,8 @@ class Card(BaseModel):
     collection_preview: bool = True
     enable_embedding: bool = False
     embedding_type: str | None = None
-    embedding_params: dict[str, Any] | None = None
+    embedding_params: SortedKeys[dict[str, Any] | None] = None
     result_metadata: list[ResultColumn] | None = None
-
-    @field_validator("embedding_params")
-    @classmethod
-    def sorted_keys(cls, value: Any) -> Any:
-        return sort_keys(value)
 
     @model_validator(mode="after")
     def stable_query_uuids(self) -> Self:

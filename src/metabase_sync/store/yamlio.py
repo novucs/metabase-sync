@@ -1,5 +1,7 @@
+import contextlib
 import os
-import tempfile
+import secrets
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -44,17 +46,23 @@ def read(path: Path) -> Any:
     return loads(path.read_text(encoding="utf-8"))
 
 
+def problem(error: yaml.YAMLError) -> str:
+    if isinstance(error, yaml.MarkedYAMLError) and error.problem_mark:
+        return f"invalid YAML at line {error.problem_mark.line + 1}: {error.problem}"
+    return f"invalid YAML: {error}"
+
+
 def write_text_atomic(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    tmp = Path(tmp_name)
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
     try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(content)
             fh.flush()
             os.fsync(fh.fileno())
+        with contextlib.suppress(FileNotFoundError):
+            os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)

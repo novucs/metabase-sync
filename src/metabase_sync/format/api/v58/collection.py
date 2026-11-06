@@ -7,9 +7,10 @@ from metabase_sync.format.representations.collection import Collection
 from metabase_sync.metabase.index import Index, location_ids
 
 ENDPOINT = "/api/collection"
-LISTING = {"archived": False}
+LISTING = {"archived": "false"}
 CONTAINER = "parent_id"
 FIXED: frozenset[str] = frozenset()
+RESET_WHEN_OMITTED: frozenset[str] = frozenset()
 
 
 class Response(BaseModel):

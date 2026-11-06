@@ -60,12 +60,12 @@ metabase-sync apply
 | `init`         | Create `metabase-sync.yaml` and a `.gitignore`.                                                                                                                                    |
 | `export`       | Pull Metabase into the files, keeping edits you haven't applied. `--check` writes nothing and exits 2 if the files are out of date. `--force` takes Metabase's version everywhere. |
 | `status`       | Show interrupted runs, changes to apply, changes made in Metabase, conflicts, and problems.                                                                                        |
-| `plan`         | Show what `apply` would change, as a diff. `--out FILE` saves the plan, `--json` prints it as JSON, `--detailed-exitcode` exits 2 when there are changes or conflicts.             |
+| `plan`         | Show what `apply` would change, as a diff. `--out FILE` saves the plan, `--json` prints it as JSON, `--detailed-exitcode` exits 2 when there are changes to apply.                 |
 | `apply [FILE]` | Apply the changes, after confirmation. With a saved plan, refuses if Metabase or the files changed since. `--auto-approve` skips the prompt.                                       |
 | `validate`     | Check the files offline.                                                                                                                                                           |
 | `fmt`          | Give files entity ids, and rewrite every file in canonical form and at its canonical path.                                                                                         |
 
-Commands run in the current directory; `--chdir DIR` (or `METABASE_SYNC_CHDIR`) runs them in another. `--verbose` lists every file and HTTP request, and `--debug` shows tracebacks.
+Commands run in the current directory; `--chdir DIR` (or `METABASE_SYNC_CHDIR`) runs them in another. `--verbose` lists every file and HTTP request, and `--debug` shows tracebacks. These three options go before or after the command.
 
 ## Exit codes
 
@@ -74,10 +74,11 @@ Commands run in the current directory; `--chdir DIR` (or `METABASE_SYNC_CHDIR`) 
 | 0    | Success, no changes                                          |
 | 1    | Error, conflict, or apply declined                           |
 | 2    | `plan --detailed-exitcode` or `export --check` found changes |
+| 130  | Interrupted                                                  |
 
 ## Configuration
 
-Environment variables, or a `.env` file in the current directory:
+Environment variables, or a `.env` file in the directory the command runs in:
 
 | Variable               | Default |                                                              |
 |------------------------|---------|--------------------------------------------------------------|
@@ -95,12 +96,12 @@ collections:
 removal: archive
 ```
 
-- `collections` limits the files to those collections and everything inside them. Leave it out to manage the whole instance.
+- `collections` limits the files to those collections and everything inside them. Leave it out to manage the whole instance. To find a collection's entity id, run `metabase-sync export` without `collections` and read `entity_id` in the collection's file. Snippets belong to the whole instance, so they are always managed.
 - `removal` is `archive` (the default) or `delete`. It decides what `apply` does with an item whose file you removed.
 
 ## Changes on both sides
 
-`metabase-sync.state` records each item's content at the last sync, so the tool can tell your edits from edits made in Metabase. Commit it with the files.
+`metabase-sync.state` records each item's content at the last sync, so the tool can tell your edits from edits made in Metabase. Commit it, and the entity ids `apply` writes into the files, after every `apply` and `export`. The [apply workflow](examples/github-actions-apply-on-merge.yml) commits them back for you.
 
 | Your files | Metabase  | `export`                          | `plan` and `apply`            |
 |------------|-----------|-----------------------------------|-------------------------------|
@@ -108,7 +109,9 @@ removal: archive
 | changed    | unchanged | keeps your file                   | apply your change             |
 | changed    | changed   | stops; `--force` takes Metabase's | stop; `--force` applies yours |
 
-Commit or apply your edits before `export --force`; it overwrites them.
+`apply --force` applies your files over every change made in Metabase since the last sync, not only the conflicts. `export --force` overwrites your unapplied edits, so commit them first.
+
+To keep both sides of a conflict, commit your files, run `metabase-sync export --force`, redo your edits from `git diff`, then `apply`.
 
 ## What isn't managed
 
@@ -141,7 +144,7 @@ subscriptions/
 - Each item is one YAML file named after it. Collections and dashboards have a folder of the same name for what they contain.
 - Collections, questions, dashboards, and snippets pass Metabase's own representation validator. Subscriptions are not part of that format and live in `subscriptions/`.
 - References between items use entity ids. Databases, tables, and fields are referenced by name, so the files apply to any instance with the same databases.
-- SQL is stored as a literal block, exactly as written.
+- SQL with several lines is stored as a literal block, exactly as written.
 - Same-named siblings get a short id suffix, so paths never change because of an unrelated item.
 - `apply` only archives items listed in `metabase-sync.state`, so content created in Metabase since the last export is never touched.
 - A subscription takes its name and its cards from its dashboard, as Metabase does. `attachments` lists the dashcards sent as CSV or XLSX, by dashcard `entity_id`, with Metabase's `include_csv`, `include_xls`, `format_rows`, and `pivot_results` settings.
@@ -178,10 +181,13 @@ A file for an item that exists in Metabase but not in `metabase-sync.state` plan
 
 Delete the file. `plan` shows an archive (or a delete with `removal: delete`). Removing a collection archives it once; Metabase archives its contents with it, and `plan` lists them. If a removed collection or dashboard holds items that are not in the files, `plan` stops with a conflict until you export them or pass `--force`. Remove a question's dashcards along with its file.
 
+With `removal: delete`, each removed item gets its own delete. Deleting a collection or dashboard in Metabase also deletes what it holds: its questions, dashboards, and collections (archived ones included), the subscriptions on those dashboards, and a collection's timelines. `plan` refuses to delete one that holds any of these that the plan doesn't delete, even with `--force`.
+
 ## Safety
 
-- `apply` plans again after you approve, and applies a saved plan only if planning now gives the same result. If Metabase or the files changed in between, it stops before writing anything.
-- `apply` records each change and each new id in `.metabase-sync/journal.jsonl` before relying on it. If a run is interrupted, the next command finds what was created and finishes the rest.
+- `apply PLANFILE` applies a saved plan only if planning now gives the same result. If Metabase or the files changed since `plan --out`, it stops before writing anything.
+- `apply` records each change and each new id in `.metabase-sync/journal.jsonl` before relying on it. If a run is interrupted, the next `apply` finds what was created and finishes the rest.
+- If Metabase refuses a change, `apply` records the changes it made and stops. Fix the files and run it again.
 - If Metabase doesn't confirm a create, `apply` stops instead of sending it again. The next run checks for the item before creating it.
 - `export` replaces each file atomically and removes stale files last, so an interrupted export loses nothing. Run it again to finish.
 
@@ -192,6 +198,10 @@ Export into a new directory with `metabase-sync init --chdir new` and `metabase-
 ## CI
 
 [`examples/`](examples/) has GitHub Actions workflows for planning on pull requests, applying on merge, and nightly drift detection.
+
+## Several instances
+
+Keep one directory per instance in the same repository, each with its own `metabase-sync.yaml` and `metabase-sync.state`, and point each run at one with `--chdir` and that instance's `METABASE_URL` and `METABASE_API_KEY`.
 
 ## Out of scope
 

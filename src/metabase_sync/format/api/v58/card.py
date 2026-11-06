@@ -11,6 +11,7 @@ ENDPOINT = "/api/card"
 LISTING = {"f": "all"}
 CONTAINER = "collection_id"
 FIXED = frozenset({"entity_id"})
+RESET_WHEN_OMITTED: frozenset[str] = frozenset()
 
 
 class Column(BaseModel):
@@ -72,6 +73,11 @@ class Request(BaseModel):
 
 
 def read(response: Response, ids: Index) -> Card:
+    database = (
+        ids.lenient(ids.database_name, response.database_id, "database id")
+        if response.database_id is not None
+        else None
+    )
     return Card(
         name=response.name,
         entity_id=response.entity_id,
@@ -89,11 +95,7 @@ def read(response: Response, ids: Index) -> Card:
         creator_id=response.creator,
         type=response.type,
         display=response.display,
-        database_id=(
-            ids.database_name(response.database_id)
-            if response.database_id is not None
-            else None
-        ),
+        database_id=database if isinstance(database, str) else None,
         dataset_query=portable(response.dataset_query, ids),
         parameters=portable(response.parameters or [], ids),
         parameter_mappings=portable(response.parameter_mappings or [], ids),

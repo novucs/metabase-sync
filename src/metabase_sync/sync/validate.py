@@ -1,5 +1,9 @@
-from pydantic import BaseModel
+import logging
+from dataclasses import dataclass, field
+from typing import Any
 
+from metabase_sync.errors import UnresolvedReferenceError, count
+from metabase_sync.format import representations
 from metabase_sync.format.representations import (
     CONTAINERS,
     DASHBOARD,
@@ -8,17 +12,26 @@ from metabase_sync.format.representations import (
     collection_of,
 )
 from metabase_sync.format.representations.dashboard import Dashboard
-from metabase_sync.format.representations.subscription import Subscription
+from metabase_sync.metabase.references import DATABASE, FIELD, TABLE, walk
 from metabase_sync.metabase.remote import Remote
-from metabase_sync.store.tree import CONFIG, Entity, LocalTree, layout
+from metabase_sync.store.tree import (
+    CONFIG,
+    LocalTree,
+    ancestors,
+    container_refs,
+    layout,
+)
+
+log = logging.getLogger(__name__)
 
 
-class Report(BaseModel):
-    errors: list[str] = []
-    warnings: list[str] = []
+@dataclass
+class Report:
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
-def validate(tree: LocalTree) -> Report:
+def validate(tree: LocalTree, scope: set[str] | None = None) -> Report:
     report = Report(errors=list(tree.problems))
     nested_ids: dict[str, str] = {}
     names: dict[tuple[str, str | None, str], list[str]] = {}
@@ -31,13 +44,14 @@ def validate(tree: LocalTree) -> Report:
                 continue
             target = tree.get(ref)
             if target is None:
-                if ref not in tree.managed:
+                if ref in tree.state:
+                    report.errors.append(
+                        f"{where}: {key} {ref} was removed from the files; restore "
+                        f"its file, or point {key} at another {kind}"
+                    )
+                elif not (scope and entity.entity_id in scope):
                     report.warnings.append(
                         f"{where}: {key} {ref} is not in the files (it must already exist in Metabase)"
-                    )
-                else:
-                    report.errors.append(
-                        f"{where}: {key} {ref} was removed from the files"
                     )
             elif target.kind != kind:
                 report.errors.append(
@@ -47,23 +61,20 @@ def validate(tree: LocalTree) -> Report:
             for nested in [*entity.data.tabs, *entity.data.dashcards]:
                 _claim(nested_ids, nested.entity_id, where, report)
             for dc in entity.data.dashcards:
+                if entity.data.tabs and dc.dashboard_tab_id is None:
+                    report.warnings.append(
+                        f"{where}: the dashcard at row {dc.row}, column {dc.col} has "
+                        "no dashboard_tab_id, so it is on none of the dashboard's tabs"
+                    )
                 card = dc.card_id
-                if (
-                    isinstance(card, str)
-                    and tree.get(card) is None
-                    and card in tree.managed
-                ):
+                if card is not None and tree.get(card) is None and card in tree.state:
                     report.errors.append(
                         f"{where}: the dashcard at row {dc.row}, column {dc.col} "
                         "shows a question whose file you removed; remove the dashcard too, "
                         "or restore the question's file"
                     )
         container = collection_of(entity.data)
-        key = (
-            entity.kind,
-            container if isinstance(container, str) else None,
-            entity.name.strip().lower(),
-        )
+        key = (entity.kind, container, entity.name.strip().lower())
         names.setdefault(key, []).append(where)
 
     for (kind, _, name), paths in names.items():
@@ -93,6 +104,7 @@ def remote_problems(
 ) -> list[str]:
     return [
         *mismatched_kinds(tree, remote),
+        *missing_references(tree, remote),
         *outside_scope(tree, remote, scope),
         *removed_dashcard_filters(tree, remote),
     ]
@@ -107,39 +119,97 @@ def mismatched_kinds(tree: LocalTree, remote: Remote) -> list[str]:
     ]
 
 
+def _references(value: Any) -> list[tuple[str, Any]]:
+    found: list[tuple[str, Any]] = []
+
+    def collect(kind: str, ref: Any) -> Any:
+        found.append((kind, ref))
+        return ref
+
+    walk(value, collect)
+    return found
+
+
+def missing_references(tree: LocalTree, remote: Remote) -> list[str]:
+    index = remote.index
+    problems: list[str] = []
+    for entity in tree.entities.values():
+        containers = CONTAINERS[entity.kind]
+        for key, value in representations.write(entity.data).items():
+            refs = (
+                [(containers[key], value)] if key in containers else _references(value)
+            )
+            for kind, ref in refs:
+                if not isinstance(ref, str) or kind in (TABLE, FIELD):
+                    continue
+                if kind == DATABASE and len(index.databases.get(ref, [])) > 1:
+                    problems.append(
+                        f"{entity.path}: {key} refers to database {ref!r}, but "
+                        f"{len(index.databases[ref])} databases in Metabase have that "
+                        "name; rename one of them in Metabase"
+                    )
+                    continue
+                if kind == DATABASE:
+                    exists = ref in index.databases
+                else:
+                    exists = (
+                        ref in tree.entities or index.existing_id(kind, ref) is not None
+                    )
+                if not exists:
+                    problems.append(
+                        f"{entity.path}: {key} refers to {kind} {ref}, which "
+                        "doesn't exist in the files or in Metabase"
+                    )
+    return problems
+
+
+def unknown_tables_and_fields(
+    tree: LocalTree, remote: Remote, entity_ids: set[str]
+) -> list[str]:
+    metadata = remote.index.metadata
+    lookup = {TABLE: metadata.table_id, FIELD: metadata.field_id}
+    problems: list[str] = []
+    for eid in sorted(entity_ids):
+        entity = tree.get(eid)
+        if entity is None:
+            continue
+        for key, value in representations.write(entity.data).items():
+            for kind, ref in _references(value):
+                if kind not in lookup or not isinstance(ref, list):
+                    continue
+                try:
+                    lookup[kind](ref)
+                except UnresolvedReferenceError as error:
+                    problems.append(f"{entity.path}: {key}: {error}")
+    return problems
+
+
 def outside_scope(tree: LocalTree, remote: Remote, scope: set[str] | None) -> list[str]:
     if scope is None:
         return []
-    inside: dict[str, bool] = {}
-
-    def contained(ref: str | None) -> bool:
-        if ref is None:
-            return False
-        if ref not in inside:
-            inside[ref] = False
-            entity = tree.get(ref)
-            inside[ref] = (
-                ref in scope
-                or (entity is not None and contained(_container(entity)))
-                or (entity is None and remote.index.find(ref) is not None)
+    outside: list[str] = []
+    for entity in tree.entities.values():
+        chain = [entity, *ancestors(tree.entities, entity)]
+        if (
+            entity.kind == SNIPPET
+            or any(e.entity_id in scope for e in chain)
+            or any(
+                ref in scope or not remote.index.is_outside(ref)
+                for ref in container_refs(chain[-1].data)
             )
-        return inside[ref]
-
-    return [
-        f"{entity.path}: this {entity.kind} is outside the collections listed "
-        f"under `collections:` in {CONFIG}; move it into one of them, or list "
-        "its collection there"
-        for entity in tree.entities.values()
-        if entity.kind != SNIPPET
-        and entity.entity_id not in scope
-        and not contained(_container(entity))
-    ]
-
-
-def _container(entity: Entity) -> str | None:
-    if isinstance(entity.data, Subscription):
-        return entity.data.dashboard_id
-    return collection_of(entity.data)
+        ):
+            continue
+        log.info("outside the collections in %s: %s", CONFIG, entity.path)
+        outside.append(str(entity.path))
+    if not outside:
+        return []
+    verb, them = ("is", "it") if len(outside) == 1 else ("are", "them")
+    problem = (
+        f"{count(len(outside), 'file')} {verb} outside the collections listed under "
+        f"`collections:` in {CONFIG}, such as {outside[0]}; move {them} into one of "
+        f"those collections, or run `metabase-sync export` to remove {them}"
+    )
+    return [problem]
 
 
 def removed_dashcard_filters(tree: LocalTree, remote: Remote) -> list[str]:

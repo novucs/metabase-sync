@@ -12,9 +12,10 @@ from metabase_sync.metabase.index import Index, RemoteItem
 from metabase_sync.metabase.references import native, portable
 
 ENDPOINT = "/api/pulse"
-LISTING: dict[str, object] = {}
+LISTING: dict[str, str] = {}
 CONTAINER = "dashboard_id"
 FIXED = frozenset({"dashboard_id"})
+RESET_WHEN_OMITTED = frozenset({"skip_if_empty", "channels"})
 
 
 class User(BaseModel):
@@ -33,7 +34,7 @@ class ChannelResponse(BaseModel):
 
 
 class CardResponse(BaseModel):
-    dashboard_card_id: int
+    dashboard_card_id: int | None
     include_csv: bool = False
     include_xls: bool = False
     format_rows: bool = True
@@ -70,13 +71,8 @@ class ChannelRequest(BaseModel):
     recipients: list[UserRecipient | EmailRecipient]
 
 
-class CardRequest(BaseModel):
+class CardRequest(CardResponse):
     id: int
-    dashboard_card_id: int
-    include_csv: bool = False
-    include_xls: bool = False
-    format_rows: bool = True
-    pivot_results: bool = False
 
 
 class Request(BaseModel):
@@ -117,7 +113,8 @@ def read(response: Response, ids: Index) -> Subscription:
                 pivot_results=card.pivot_results,
             )
             for card in response.cards
-            if card.include_csv or card.include_xls
+            if card.dashboard_card_id is not None
+            and (card.include_csv or card.include_xls)
         ],
     )
 

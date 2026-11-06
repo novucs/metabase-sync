@@ -1,6 +1,7 @@
 import base64
 import hashlib
-from collections.abc import Iterator
+import os
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -8,15 +9,14 @@ from typing import Any
 import yaml
 from slugify import slugify as python_slugify
 
-from metabase_sync.errors import ConfigError, StateError, ValidationFailed
+from metabase_sync.errors import ConfigError, ValidationFailed
 from metabase_sync.format import representations
-from metabase_sync.format.representations import COLLECTION, DASHBOARD, Item
+from metabase_sync.format.representations import MODELS, Item
 from metabase_sync.format.representations.card import Card
 from metabase_sync.format.representations.snippet import Snippet
 from metabase_sync.format.representations.subscription import Subscription
-from metabase_sync.ids import is_entity_id
 from metabase_sync.store import yamlio
-from metabase_sync.store.state import STATE, Managed, read_state, state_text
+from metabase_sync.store.state import Managed, read_state, write_state
 
 MAIN = Path("collections") / "main"
 SNIPPETS = Path("collections") / "snippets"
@@ -38,7 +38,7 @@ class Entity:
     kind: str
     data: Item
     path: Path | None = None
-    needs_ids: bool = False
+    provisional: list[str] = field(default_factory=list)
 
     @property
     def entity_id(self) -> str:
@@ -56,10 +56,6 @@ class LocalTree:
     problems: list[str] = field(default_factory=list)
     state: dict[str, Managed] = field(default_factory=dict)
 
-    @property
-    def managed(self) -> set[str]:
-        return set(self.state)
-
     def prior(self, entity_id: str) -> str | None:
         found = self.state.get(entity_id)
         return found.hash if found else None
@@ -68,14 +64,46 @@ class LocalTree:
         found = {eid for eid, e in self.entities.items() if e.kind == kind}
         return found | {eid for eid, entry in self.state.items() if entry.kind == kind}
 
-    def get(self, entity_id: object) -> Entity | None:
-        return self.entities.get(entity_id) if isinstance(entity_id, str) else None
+    def get(self, entity_id: str | None) -> Entity | None:
+        return self.entities.get(entity_id) if entity_id is not None else None
 
     def label(self, entity: Entity) -> str:
         if not isinstance(entity.data, Subscription):
             return entity.name
         dashboard = self.get(entity.data.dashboard_id)
         return f"to {dashboard.name}" if dashboard else "to an unmanaged dashboard"
+
+
+def container_refs(item: Item) -> list[str]:
+    if isinstance(item, Subscription):
+        refs = [item.dashboard_id]
+    elif isinstance(item, Card):
+        refs = [item.dashboard_id, item.collection_id]
+    else:
+        refs = [representations.collection_of(item)]
+    return [ref for ref in refs if ref]
+
+
+def parent(entities: Mapping[str, Entity], entity: Entity) -> Entity | None:
+    return next(
+        (entities[ref] for ref in container_refs(entity.data) if ref in entities),
+        None,
+    )
+
+
+def ancestors(entities: Mapping[str, Entity], entity: Entity) -> list[Entity]:
+    found: list[Entity] = []
+    seen = {entity.entity_id}
+    cursor = parent(entities, entity)
+    while cursor is not None:
+        if cursor.entity_id in seen:
+            raise ValidationFailed(
+                [f"{entity.path}: {cursor.kind} {cursor.entity_id} is inside itself"]
+            )
+        seen.add(cursor.entity_id)
+        found.append(cursor)
+        cursor = parent(entities, cursor)
+    return found
 
 
 def load_files(root: Path) -> tuple[list[File], list[str]]:
@@ -87,13 +115,15 @@ def load_files(root: Path) -> tuple[list[File], list[str]]:
             try:
                 data = yamlio.read(path)
             except yaml.YAMLError as e:
-                problems.append(f"{rel}: invalid YAML ({e})")
+                problems.append(f"{rel}: {yamlio.problem(e)}")
                 continue
             kind = representations.kind_of(data) if isinstance(data, dict) else None
             if not isinstance(data, dict):
                 problems.append(f"{rel}: expected a mapping")
             elif kind is None:
-                problems.append(f"{rel}: missing or unknown serdes/meta model")
+                problems.append(
+                    f"{rel}: serdes/meta needs a model, one of {', '.join(MODELS)}"
+                )
             else:
                 found.append(File(path=rel, kind=kind, data=data))
     return found, problems
@@ -102,7 +132,7 @@ def load_files(root: Path) -> tuple[list[File], list[str]]:
 def require(root: Path) -> None:
     if not (root / CONFIG).exists():
         raise ConfigError(
-            f"{root} has no {CONFIG}",
+            f"{root.resolve()} has no {CONFIG}",
             hint="Run `metabase-sync init` there, or pass --chdir DIR to run elsewhere",
         )
 
@@ -122,12 +152,12 @@ def id_holders(
                 yield nested, (key, index)
 
 
-def _fill_ids(file: File) -> bool:
-    filled = False
+def _fill_ids(file: File) -> list[str]:
+    filled: list[str] = []
     for holder, at in id_holders(file.data):
         if holder.get("entity_id") is None:
             holder["entity_id"] = provisional_id(file.path, *at)
-            filled = True
+            filled.append(holder["entity_id"])
     return filled
 
 
@@ -137,11 +167,13 @@ def read_tree(root: Path) -> LocalTree:
         return tree
     found, tree.problems = load_files(root)
     for file in found:
-        needs_ids = _fill_ids(file)
+        provisional = _fill_ids(file)
         eid = file.data.get("entity_id")
-        if is_entity_id(eid) and eid in tree.entities:
+        if isinstance(eid, str) and eid in tree.entities:
             tree.problems.append(
-                f"{file.path}: entity_id {eid} already used by {tree.entities[eid].path}"
+                f"{file.path}: entity_id {eid} already used by "
+                f"{tree.entities[eid].path}; remove one of the two files, or remove "
+                "entity_id from a copy to make it a new item"
             )
             continue
         try:
@@ -150,7 +182,7 @@ def read_tree(root: Path) -> LocalTree:
             tree.problems.extend(e.problems)
         else:
             tree.entities[item.entity_id] = Entity(
-                kind=file.kind, data=item, path=file.path, needs_ids=needs_ids
+                kind=file.kind, data=item, path=file.path, provisional=provisional
             )
     tree.state = read_state(root)
     return tree
@@ -189,58 +221,36 @@ def assign_names(items: list[Named]) -> dict[str, str]:
 
 
 def layout(entities: list[Entity]) -> dict[str, Path]:
-    collections = {e.entity_id for e in entities if e.kind == COLLECTION}
-    dashboards = {e.entity_id for e in entities if e.kind == DASHBOARD}
-    folder_of: dict[str, tuple[str, str | None]] = {}
-    for entity in entities:
-        eid, data = entity.entity_id, entity.data
-        container = representations.collection_of(data)
-        if isinstance(data, Card) and data.dashboard_id in dashboards:
-            folder_of[eid] = ("dash", data.dashboard_id)
-        elif isinstance(data, Snippet):
-            folder_of[eid] = ("snippets", None)
-        elif isinstance(data, Subscription):
-            folder_of[eid] = ("subscriptions", None)
-        else:
-            folder_of[eid] = ("coll", container if container in collections else None)
-
-    siblings: dict[tuple[str, str | None], list[Named]] = {}
     by_id = {e.entity_id: e for e in entities}
+    special = {Snippet: SNIPPETS, Subscription: SUBSCRIPTIONS}
+
+    def place(entity: Entity) -> Path | str | None:
+        if type(entity.data) in special:
+            return special[type(entity.data)]
+        found = parent(by_id, entity)
+        return found.entity_id if found else None
+
+    siblings: dict[Path | str | None, list[Named]] = {}
     for entity in entities:
         subscribed = (
             entity.data.dashboard_id if isinstance(entity.data, Subscription) else None
         )
         source = by_id[subscribed].name if subscribed in by_id else entity.name
-        siblings.setdefault(folder_of[entity.entity_id], []).append(
+        siblings.setdefault(place(entity), []).append(
             Named(entity_id=entity.entity_id, slug=slugify(source))
         )
     names: dict[str, str] = {}
     for group in siblings.values():
         names.update(assign_names(group))
 
-    fixed: dict[tuple[str, str | None], Path] = {
-        ("coll", None): MAIN,
-        ("snippets", None): SNIPPETS,
-        ("subscriptions", None): SUBSCRIPTIONS,
-    }
-    resolved: dict[tuple[str, str | None], Path] = {}
+    def path(entity: Entity) -> Path:
+        file = f"{names[entity.entity_id]}.yaml"
+        if type(entity.data) in special:
+            return special[type(entity.data)] / file
+        folders = [names[a.entity_id] for a in reversed(ancestors(by_id, entity))]
+        return MAIN.joinpath(*folders, file)
 
-    def folder_path(key: tuple[str, str | None], depth: int = 0) -> Path:
-        if key in fixed:
-            return fixed[key]
-        if key in resolved:
-            return resolved[key]
-        owner = key[1]
-        assert owner is not None
-        if depth > 100:
-            raise StateError(f"collection {owner} is its own ancestor")
-        resolved[key] = folder_path(folder_of[owner], depth + 1) / names[owner]
-        return resolved[key]
-
-    return {
-        e.entity_id: folder_path(folder_of[e.entity_id]) / f"{names[e.entity_id]}.yaml"
-        for e in entities
-    }
+    return {e.entity_id: path(e) for e in entities}
 
 
 def render(entities: list[Entity]) -> dict[Path, str]:
@@ -249,6 +259,40 @@ def render(entities: list[Entity]) -> dict[Path, str]:
         paths[e.entity_id]: yamlio.dumps(representations.write(e.data))
         for e in entities
     }
+
+
+@dataclass
+class Changes:
+    added: list[str]
+    changed: list[str]
+    moved: list[str]
+    removed: list[str]
+
+    @property
+    def empty(self) -> bool:
+        return not (self.added or self.changed or self.moved or self.removed)
+
+
+def changes(
+    current: dict[Path, str], rendered: dict[Path, str], moves: dict[Path, Path]
+) -> Changes:
+    moved = {
+        old: new
+        for old, new in moves.items()
+        if old != new and old in current and new not in current
+    }
+    return Changes(
+        added=sorted(
+            str(p) for p in rendered.keys() - current.keys() - set(moved.values())
+        ),
+        changed=sorted(
+            str(p)
+            for p in rendered.keys() & current.keys()
+            if rendered[p] != current[p]
+        ),
+        moved=sorted(f"{old} -> {new}" for old, new in moved.items()),
+        removed=sorted(str(p) for p in current.keys() - rendered.keys() - moved.keys()),
+    )
 
 
 def current_files(root: Path) -> dict[Path, str]:
@@ -260,9 +304,17 @@ def current_files(root: Path) -> dict[Path, str]:
 
 
 def write_tree(
-    root: Path, rendered: dict[Path, str], state: dict[str, Managed]
+    root: Path,
+    rendered: dict[Path, str],
+    state: dict[str, Managed],
+    moves: dict[Path, Path],
 ) -> None:
     current = current_files(root)
+    for old, new in moves.items():
+        if old in current and new not in current:
+            (root / new).parent.mkdir(parents=True, exist_ok=True)
+            os.replace(root / old, root / new)
+            current[new] = current.pop(old)
     for rel, text in rendered.items():
         if current.get(rel) != text:
             yamlio.write_text_atomic(root / rel, text)
@@ -272,4 +324,4 @@ def write_tree(
         while folder.parent != root and not any(folder.iterdir()):
             folder.rmdir()
             folder = folder.parent
-    yamlio.write_text_atomic(root / STATE, state_text(state))
+    write_state(root, state)

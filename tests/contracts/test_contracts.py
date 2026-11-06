@@ -31,8 +31,10 @@ from metabase_sync.format.representations.subscription import (
     Channel,
     Subscription,
 )
-from metabase_sync.metabase.client import TESTED
+from metabase_sync.metabase.client import MetabaseClient
 from metabase_sync.metabase.index import Index
+from metabase_sync.metabase.metadata import Metadata
+from metabase_sync.settings import Settings
 
 from ..pins import REPRESENTATIONS
 
@@ -134,7 +136,7 @@ def test_the_files_cover_every_field_metabase_defines(
     assert theirs - ours == set(left_out), "fields neither managed nor left out"
 
 
-@pytest.fixture(scope="module", params=TESTED, ids=[f"0.{v}" for v in TESTED])
+@pytest.fixture(scope="module", params=VERSIONS, ids=[f"0.{v}" for v in VERSIONS])
 def version(request: pytest.FixtureRequest) -> tuple[ModuleType, dict[str, Any]]:
     response = requests.get(
         f"https://www.metabase.com/docs/v0.{request.param}/api.json", timeout=60
@@ -236,10 +238,12 @@ ENDPOINTS = [(kind, e) for kind in KINDS for e in (CREATE, UPDATE)] + [
 
 
 def _index() -> Index:
+    databases = {"Warehouse": [1]}
+    settings = Settings.model_validate({"url": "http://mb.test", "api_key": "k"})
     index = Index(
         version="v0.65.3",
-        metadata=None,  # type: ignore[arg-type]
-        databases={1: "Warehouse"},
+        metadata=Metadata(MetabaseClient(settings), databases),
+        databases=databases,
         users={1: "user@example.com"},
     )
     index.add(COLLECTION, {"id": 1, "entity_id": "C" * 21})

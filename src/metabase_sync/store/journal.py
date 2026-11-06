@@ -1,12 +1,15 @@
+import logging
 import os
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, RootModel, ValidationError
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from metabase_sync.store.tree import WORKDIR
+
+log = logging.getLogger(__name__)
 
 
 class _Entry(BaseModel):
@@ -52,10 +55,7 @@ class Renamed(_Entry):
 
 
 Entry = Started | Done | Posting | Created | Renamed
-
-
-class _Line(RootModel[Entry]):
-    root: Entry = Field(discriminator="status")
+LINE: TypeAdapter[Entry] = TypeAdapter(Annotated[Entry, Field(discriminator="status")])
 
 
 class Journal:
@@ -67,13 +67,14 @@ class Journal:
         if not self.path.exists():
             return []
         out: list[Entry] = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
+        lines = self.path.read_text(encoding="utf-8").splitlines()
+        for number, line in enumerate(lines, start=1):
             if not line.strip():
                 continue
             try:
-                out.append(_Line.model_validate_json(line).root)
+                out.append(LINE.validate_json(line))
             except ValidationError:
-                break
+                log.warning("skipped unreadable line %d of %s", number, self.path)
         return out
 
     def record(self, entry: Entry) -> None:

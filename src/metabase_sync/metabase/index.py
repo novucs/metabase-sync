@@ -88,16 +88,18 @@ def rows(listing: Any) -> list[dict[str, Any]]:
 class Index:
     version: str
     metadata: Metadata
-    minor: int = 0
     items: dict[str, dict[int, RemoteItem]] = field(default_factory=dict)
     raw: dict[tuple[str, int], dict[str, Any]] = field(default_factory=dict)
     outside: dict[tuple[str, int], str] = field(default_factory=dict)
-    databases: dict[int, str] = field(default_factory=dict)
+    databases: dict[str, list[int]] = field(default_factory=dict)
     users: dict[int, str] = field(default_factory=dict)
+    timelines: list[RemoteItem] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-    _by_eid: dict[str, tuple[str, int]] = field(default_factory=dict)
-    _dashcards: dict[int, str] = field(default_factory=dict)
-    _tabs: dict[int, list[str]] = field(default_factory=dict)
+    _by_eid: dict[str, tuple[str, int]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _dashcards: dict[int, str] = field(default_factory=dict, init=False, repr=False)
+    _tabs: dict[int, list[str]] = field(default_factory=dict, init=False, repr=False)
 
     def add(self, kind: str, raw: dict[str, Any]) -> RemoteItem:
         item = RemoteItem.model_validate(raw, extra="ignore")
@@ -149,6 +151,9 @@ class Index:
         self.outside[kind, item_id] = entity_id
         self._by_eid.setdefault(entity_id, (kind, item_id))
 
+    def is_outside(self, entity_id: str) -> bool:
+        return entity_id in self._by_eid and self.find(entity_id) is None
+
     def existing_id(self, kind: str, entity_id: str) -> int | None:
         found = self._by_eid.get(entity_id)
         return found[1] if found is not None and found[0] == kind else None
@@ -172,18 +177,10 @@ class Index:
         return self._dashcards[dashcard_id]
 
     def database_name(self, database_id: int) -> str:
-        if database_id not in self.databases:
-            raise UnresolvedReferenceError(f"database id {database_id} not found")
-        return self.databases[database_id]
-
-    def database_id(self, name: str) -> int:
-        for database_id, database in self.databases.items():
-            if database == name:
-                return database_id
-        raise UnresolvedReferenceError(
-            f"database {name!r} not found in Metabase",
-            hint="Database names must match the Metabase admin database list",
-        )
+        for name, found in self.databases.items():
+            if database_id in found:
+                return name
+        raise UnresolvedReferenceError(f"database id {database_id} not found")
 
     def user_id(self, email: str) -> int | None:
         for user_id, user in self.users.items():
@@ -205,41 +202,50 @@ def with_detail(summary: dict[str, Any], detail: dict[str, Any]) -> dict[str, An
     return {**summary, **detail}
 
 
+LISTINGS: dict[str, tuple[str, dict[str, str]]] = {
+    "collections": (
+        "/api/collection",
+        {"archived": "false", "exclude_other_user_collections": "true"},
+    ),
+    "archived collections": (
+        "/api/collection",
+        {"archived": "true", "exclude_other_user_collections": "true"},
+    ),
+    "cards": ("/api/card", {"f": "all"}),
+    "archived cards": ("/api/card", {"f": "archived"}),
+    "dashboards": ("/api/dashboard", {"f": "all"}),
+    "archived dashboards": ("/api/dashboard", {"f": "archived"}),
+    "snippets": ("/api/native-query-snippet", {}),
+    "archived snippets": ("/api/native-query-snippet", {"archived": "true"}),
+    "pulses": ("/api/pulse", {}),
+    "archived pulses": ("/api/pulse", {"archived": "true"}),
+    "databases": ("/api/database", {}),
+    "users": ("/api/user", {"status": "all"}),
+    "timelines": ("/api/timeline", {}),
+    "archived timelines": ("/api/timeline", {"archived": "true"}),
+}
+
+
 def fetch_index(client: MetabaseClient, roots: set[str] | None = None) -> Index:
-    raw = client.map(
-        lambda args: client.get(args[0], **args[1]),
-        [
-            (
-                "/api/collection",
-                {"archived": False, "exclude_other_user_collections": True},
-            ),
-            (
-                "/api/collection",
-                {"archived": True, "exclude_other_user_collections": True},
-            ),
-            ("/api/card", {"f": "all"}),
-            ("/api/card", {"f": "archived"}),
-            ("/api/dashboard", {"f": "all"}),
-            ("/api/dashboard", {"f": "archived"}),
-            ("/api/native-query-snippet", {}),
-            ("/api/native-query-snippet", {"archived": True}),
-            ("/api/pulse", {}),
-            ("/api/pulse", {"archived": True}),
-            ("/api/database", {}),
-            ("/api/user", {"status": "all"}),
-        ],
+    listed = client.map(
+        lambda listing: rows(client.get(listing[0], **listing[1])), LISTINGS.values()
     )
-    collections, cards, dashboards, snippets, pulses = (
-        rows(raw[i]) + rows(raw[i + 1]) for i in range(0, 10, 2)
-    )
-    databases = {row["id"]: row["name"] for row in rows(raw[10])}
-    minor, tag = client.supported_version
+    raw = dict(zip(LISTINGS, listed, strict=True))
+    collections = raw["collections"] + raw["archived collections"]
+    cards = raw["cards"] + raw["archived cards"]
+    dashboards = raw["dashboards"] + raw["archived dashboards"]
+    databases: dict[str, list[int]] = {}
+    for row in raw["databases"]:
+        databases.setdefault(row["name"], []).append(row["id"])
     index = Index(
-        version=tag,
-        minor=minor,
+        version=client.supported_version[1],
         metadata=Metadata(client, databases),
         databases=databases,
-        users={row["id"]: row["email"] for row in rows(raw[11]) if row.get("email")},
+        users={row["id"]: row["email"] for row in raw["users"] if row.get("email")},
+        timelines=[
+            RemoteItem.model_validate(row, extra="ignore")
+            for row in raw["timelines"] + raw["archived timelines"]
+        ],
     )
 
     summaries_of = [
@@ -284,12 +290,25 @@ def fetch_index(client: MetabaseClient, roots: set[str] | None = None) -> Index:
     for summary, detail in zip(listed, details, strict=True):
         index.add(DASHBOARD, with_detail(summary, detail))
 
-    for row in snippets:
+    for row in raw["snippets"] + raw["archived snippets"]:
         index.add(SNIPPET, row)
-    for row in pulses:
-        if row.get("dashboard_id") in index.items.get(DASHBOARD, {}):
-            index.add(SUBSCRIPTION, row)
+    for row in raw["pulses"] + raw["archived pulses"]:
+        add_subscription(index, row)
     return index
+
+
+def add_subscription(index: Index, row: dict[str, Any]) -> None:
+    in_scope = row.get("dashboard_id") in index.items.get(DASHBOARD, {})
+    if in_scope and row.get("channels"):
+        index.add(SUBSCRIPTION, row)
+        return
+    if row.get("entity_id"):
+        index.add_outside(SUBSCRIPTION, row["id"], row["entity_id"])
+    if in_scope and not row.get("archived"):
+        index.warnings.append(
+            f"skipped subscription {row['id']} on dashboard {row['dashboard_id']}: "
+            "it has no channels, so the files can't hold it"
+        )
 
 
 def add_hidden_subscriptions(
@@ -305,5 +324,4 @@ def add_hidden_subscriptions(
     )
     ids = [t["id"] for t in found["entity_ids"].values() if t.get("status") == "ok"]
     for row in client.map(lambda i: client.get(f"/api/pulse/{i}"), ids):
-        if row.get("dashboard_id") in index.items.get(DASHBOARD, {}):
-            index.add(SUBSCRIPTION, row)
+        add_subscription(index, row)

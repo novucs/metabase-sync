@@ -3,7 +3,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from metabase_sync.format.representations.content import sort_keys
+from metabase_sync.format.representations.content import SortedKeys
 from metabase_sync.ids import EntityId
 
 
@@ -36,14 +36,9 @@ class Subscription(BaseModel):
     dashboard_id: EntityId
     skip_if_empty: bool = False
     disable_links: bool = False
-    parameters: list[Any] = []
+    parameters: SortedKeys[list[Any]] = []
     channels: list[Channel] = Field(min_length=1)
     attachments: list[Attachment] = []
-
-    @field_validator("parameters")
-    @classmethod
-    def sorted_keys(cls, value: Any) -> Any:
-        return sort_keys(value)
 
     @field_validator("channels")
     @classmethod

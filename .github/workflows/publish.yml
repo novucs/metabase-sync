@@ -6,15 +6,31 @@ on:
       - "v*"
 
 jobs:
-  build:
-    name: Build sdist + wheel
+  checks:
+    name: Checks
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    name: Tag matches the version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Compare the tag with pyproject.toml and __version__
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          grep -qx "version = \"$version\"" pyproject.toml
+          grep -qx "__version__ = \"$version\"" src/metabase_sync/__init__.py
+
+  build:
+    name: Build sdist + wheel
+    needs: [checks, version]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
       - name: Build
         run: uv build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dist
           path: dist/
@@ -27,13 +43,13 @@ jobs:
       name: pypi
       url: https://pypi.org/project/metabase-sync/
     permissions:
-      id-token: write   # required for PyPI trusted publishing (OIDC)
+      id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086
 
   release:
     name: Attach to GitHub Release
@@ -42,12 +58,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: dist
           path: dist/
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           files: dist/*
           generate_release_notes: true

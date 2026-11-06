@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -26,7 +27,7 @@ jobs:
         run: uv run ruff format --check src tests
 
   typecheck:
-    name: Type check (pyright on src/)
+    name: Type check (pyright)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,7 +37,7 @@ jobs:
       - name: Sync dependencies
         run: uv sync --all-groups
       - name: pyright
-        run: uv run pyright src
+        run: uv run pyright src tests
 
   unit:
     name: Unit tests

@@ -1,13 +1,16 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
+import yaml
 from pydantic import BaseModel, ValidationError
 
 from metabase_sync.errors import (
+    ApplyStopped,
     ConfigError,
     ConflictError,
+    MetabaseSyncError,
     NotKeptError,
     StalePlanError,
     StateError,
@@ -17,8 +20,8 @@ from metabase_sync.errors import (
 from metabase_sync.format import representations
 from metabase_sync.format.api import for_version
 from metabase_sync.format.representations import DASHBOARD, KINDS, SUBSCRIPTION
-from metabase_sync.ids import EntityId, is_entity_id, new_entity_id
-from metabase_sync.metabase.client import MetabaseClient
+from metabase_sync.ids import EntityId, new_entity_id
+from metabase_sync.metabase.client import MetabaseClient, UncertainWriteError
 from metabase_sync.metabase.index import (
     RemoteItem,
     add_hidden_subscriptions,
@@ -27,10 +30,10 @@ from metabase_sync.metabase.index import (
 from metabase_sync.metabase.remote import Remote
 from metabase_sync.store import tree, yamlio
 from metabase_sync.store.journal import Journal
-from metabase_sync.store.state import Managed, read_state, write_state
-from metabase_sync.store.tree import CONFIG, Entity, LocalTree, read_tree
+from metabase_sync.store.state import Managed, write_state
+from metabase_sync.store.tree import CONFIG, Changes, Entity, LocalTree, read_tree
 from metabase_sync.sync.apply import Executor, reconcile
-from metabase_sync.sync.compare import not_kept
+from metabase_sync.sync.compare import not_kept, remote_hash
 from metabase_sync.sync.match import find_imports, renamed
 from metabase_sync.sync.operations import (
     ARCHIVE,
@@ -44,6 +47,7 @@ from metabase_sync.sync.operations import (
     Operation,
     Plan,
     classify,
+    digest,
     local_hash,
 )
 from metabase_sync.sync.plan import build_plan
@@ -59,14 +63,29 @@ def load_config(root: Path) -> Config:
     path = root / CONFIG
     try:
         return Config.model_validate(yamlio.read(path) or {}, extra="forbid")
+    except yaml.YAMLError as e:
+        raise ConfigError(f"{path}: {yamlio.problem(e)}") from e
     except ValidationError as e:
-        raise ConfigError(f"{path}: {'; '.join(describe(e))}") from e
+        raise ConfigError(f"{path}: {'; '.join(describe(e, Config))}") from e
 
 
 def connect(client: MetabaseClient, config: Config, local: LocalTree) -> Remote:
+    api = for_version(*client.supported_version)
     index = fetch_index(client, config.collections)
+    unknown = sorted(
+        eid
+        for eid in config.collections or ()
+        if index.find(eid) is None and eid not in local.entities
+    )
+    if unknown:
+        raise ConfigError(
+            f"{CONFIG} lists collections that aren't in Metabase, or are personal: "
+            + ", ".join(unknown),
+            hint="Run `metabase-sync export` without `collections:` and copy the "
+            "entity_id from the collection's file",
+        )
     add_hidden_subscriptions(client, index, local.ids_of(SUBSCRIPTION))
-    return Remote(index=index, api=for_version(index.minor))
+    return Remote(index=index, api=api)
 
 
 def remote_entities(remote: Remote) -> list[Entity]:
@@ -83,17 +102,16 @@ def remote_entities(remote: Remote) -> list[Entity]:
     return out
 
 
-class ExportResult(BaseModel):
-    added: list[str] = []
-    removed: list[str] = []
-    changed: list[str] = []
-    kept: list[str] = []
-    conflicts: list[Drift] = []
-    warnings: list[str] = []
+@dataclass
+class ExportResult:
+    files: Changes
+    kept: list[str]
+    conflicts: list[Drift]
+    warnings: list[str]
 
     @property
     def clean(self) -> bool:
-        return not (self.added or self.removed or self.changed or self.conflicts)
+        return self.files.empty and not self.conflicts
 
 
 def _not_interrupted(root: Path) -> None:
@@ -115,19 +133,24 @@ def export(
     remote = connect(client, load_config(root), local)
     local = renamed(local, find_imports(local, remote)[0])
     pulled = {e.entity_id: e for e in remote_entities(remote)}
-    result = ExportResult(warnings=list(dict.fromkeys(remote.index.warnings)))
+    conflicts: list[Drift] = []
+    unapplied: list[str] = []
     taken: list[Entity] = []
     kept: list[Entity] = []
     state: dict[str, Managed] = {}
-    for eid in sorted(pulled.keys() | local.entities.keys() | local.managed):
+    for eid in sorted(pulled.keys() | local.entities.keys() | local.state.keys()):
         mine, theirs = local.entities.get(eid), pulled.get(eid)
         what = mine or theirs
         if what is None:
             continue
+        prior = local.prior(eid)
+        ours = representations.comparable(mine.data) if mine else {}
         situation = classify(
-            local.prior(eid),
-            local_hash(mine) if mine else None,
-            local_hash(theirs) if theirs else None,
+            prior,
+            digest(ours) if mine else None,
+            remote_hash(prior, representations.comparable(theirs.data), ours)
+            if theirs
+            else None,
         )
         if situation == CONFLICT and not force:
             if mine is None:
@@ -136,12 +159,12 @@ def export(
                 change = "changed here, archived or deleted in Metabase"
             else:
                 change = "changed here and in Metabase"
-            result.conflicts.append(
+            conflicts.append(
                 Drift(
                     kind=what.kind,
                     entity_id=eid,
                     name=what.name,
-                    path=str(mine.path) if mine else "",
+                    path=str(mine.path) if mine else None,
                     change=change,
                 )
             )
@@ -160,7 +183,7 @@ def export(
         if eid in local.state:
             state[eid] = local.state[eid]
         if situation == OURS or (situation == UNMANAGED and theirs is not None):
-            result.kept.append(
+            unapplied.append(
                 str(mine.path) if mine else f"your removal of {what.kind} {what.name!r}"
             )
     current = tree.current_files(root)
@@ -176,14 +199,19 @@ def export(
                 hint="Run `metabase-sync apply` first, or move the file",
             )
         rendered[path] = current[path]
-    result.added = sorted(str(p) for p in rendered.keys() - current.keys())
-    result.removed = sorted(str(p) for p in current.keys() - rendered.keys())
-    result.changed = sorted(
-        str(p) for p in rendered.keys() & current.keys() if rendered[p] != current[p]
+    moves = {
+        mine.path: paths[e.entity_id]
+        for e in taken
+        if (mine := local.entities.get(e.entity_id)) and mine.path
+    }
+    if not check and not conflicts:
+        tree.write_tree(root, rendered, state, moves)
+    return ExportResult(
+        files=tree.changes(current, rendered, moves),
+        kept=unapplied,
+        conflicts=conflicts,
+        warnings=list(dict.fromkeys(remote.index.warnings)),
     )
-    if not check and not result.conflicts:
-        tree.write_tree(root, rendered, state)
-    return result
 
 
 @dataclass
@@ -198,14 +226,14 @@ class Prepared:
 def prepare(client: MetabaseClient, root: Path, recover: bool) -> Prepared:
     tree.require(root)
     config = load_config(root)
-    if recover:
-        api = for_version(client.supported_version[0])
-        notes = reconcile(client, api, Journal(root), read_tree(root))
-    else:
+    notes: list[str] = []
+    if not recover:
         _not_interrupted(root)
-        notes = []
+    elif Journal(root).entries():
+        api = for_version(*client.supported_version)
+        notes = reconcile(client, api, Journal(root), read_tree(root))
     local = read_tree(root)
-    report = validate(local)
+    report = validate(local, config.collections)
     if report.errors:
         raise ValidationFailed(report.errors)
     remote = connect(client, config, local)
@@ -225,46 +253,66 @@ def plan(
     return prepared, result
 
 
-def apply(
-    client: MetabaseClient,
-    root: Path,
-    plan_file: Path | None,
-    approve: Callable[[Prepared, Plan], bool],
-    on_done: Callable[[Operation, str], None],
-    force: bool = False,
-) -> tuple[Prepared, Plan, bool]:
+def plan_apply(
+    client: MetabaseClient, root: Path, plan_file: Path | None, force: bool = False
+) -> tuple[Prepared, Plan]:
     saved = _read_plan(plan_file) if plan_file else None
     if saved is not None:
         force = saved.force
     prepared, result = plan(client, root, force, recover=True)
     if saved is not None and saved.fingerprint != result.fingerprint:
+        before = {op.model_dump_json(): op for op in saved.operations}
+        after = {op.model_dump_json(): op for op in result.operations}
+        both = before | after
+        differ = sorted(
+            {f"{both[k].kind} {both[k].name!r}" for k in before.keys() ^ after.keys()}
+        )
         raise StalePlanError(
-            f"{plan_file} no longer matches Metabase or the files",
+            f"{plan_file} no longer matches Metabase or the files"
+            + (f"; these items changed: {', '.join(differ)}" if differ else ""),
             hint="Run `metabase-sync plan --out` again and review it",
         )
     if result.conflicts and not force:
-        raise ConflictError(result.conflicts)
-    if saved is None and not result.empty and not approve(prepared, result):
-        return prepared, result, False
+        raise ConflictError(result.conflicts, len(result.drift))
+    return prepared, result
+
+
+def apply(
+    client: MetabaseClient,
+    root: Path,
+    prepared: Prepared,
+    result: Plan,
+    on_done: Callable[[Operation, str], None],
+) -> None:
     journal = Journal(root)
     if result.empty:
         write_state(root, _state_after(prepared.tree, result))
         journal.clear()
-        return prepared, result, True
+        return
     executor = Executor(client, prepared.tree, prepared.remote, journal, on_done)
-    executor.run(result)
-    write_state(root, _state_after(prepared.tree, result))
-    journal.clear()
-    written = {
-        executor.renamed.get(op.entity_id, op.entity_id)
-        for op in result.operations
-        if op.action in POSITIVE
-    }
-    prepared.remote.refresh(client, written)
+    written = {op.entity_id for op in result.operations if op.action in POSITIVE}
+    try:
+        executor.run(result)
+        written = {executor.renamed.get(eid, eid) for eid in written}
+        prepared.remote.refresh(client, written)
+    except UncertainWriteError:
+        raise
+    except Exception as error:
+        reconcile(client, prepared.remote.api, journal, prepared.tree)
+        if isinstance(error, MetabaseSyncError):
+            raise ApplyStopped(error, len(executor.applied)) from error
+        raise
     dropped = not_kept(prepared.tree, prepared.remote, written)
+    state = _state_after(prepared.tree, result)
+    for item in dropped:
+        hit = prepared.remote.index.find(item.entity_id)
+        if hit is not None:
+            theirs = representations.comparable(prepared.remote.item(*hit))
+            state[item.entity_id] = Managed(kind=item.kind, hash=digest(theirs))
+    write_state(root, state)
+    journal.clear()
     if dropped:
         raise NotKeptError(dropped)
-    return prepared, result, True
 
 
 def _read_plan(path: Path) -> Plan:
@@ -291,57 +339,45 @@ def _state_after(local: LocalTree, result: Plan) -> dict[str, Managed]:
     return state
 
 
-def fmt(root: Path) -> tuple[list[str], list[str]]:
+def fmt(root: Path) -> tuple[list[str], Changes]:
     tree.require(root)
-    assigned: list[str] = []
-    found, problems = tree.load_files(root)
-    if problems:
-        raise ValidationFailed(problems)
-    for file in found:
-        for holder, _ in tree.id_holders(file.data):
-            if not is_entity_id(holder.get("entity_id")):
-                holder["entity_id"] = new_entity_id()
-                if str(file.path) not in assigned:
-                    assigned.append(str(file.path))
-    seen: set[str] = set()
-    for file in found:
-        eid = file.data["entity_id"]
-        if eid in seen:
-            raise ValidationFailed([f"{file.path}: duplicate entity_id {eid}"])
-        seen.add(eid)
-    entities: list[Entity] = []
-    invalid: list[str] = []
-    for file in found:
-        try:
-            item = representations.read(file.data, file.kind, file.path)
-        except ValidationFailed as e:
-            invalid.extend(e.problems)
-        else:
-            entities.append(Entity(kind=file.kind, data=item, path=file.path))
-    if invalid:
-        raise ValidationFailed(invalid)
+    _not_interrupted(root)
+    local = read_tree(root)
+    if local.problems:
+        raise ValidationFailed(local.problems)
+    entities = list(local.entities.values())
+    mapping = {old: new_entity_id() for e in entities for old in e.provisional}
+    entities = [
+        replace(e, data=representations.swapped(e.data, mapping)) for e in entities
+    ]
+    paths = tree.layout(entities)
     rendered = tree.render(entities)
     before = tree.current_files(root)
-    moved = sorted(str(p) for p in rendered.keys() - before.keys())
+    moves = {e.path: paths[e.entity_id] for e in entities if e.path}
     if rendered != before:
-        tree.write_tree(root, rendered, read_state(root))
-    return assigned, moved
+        tree.write_tree(root, rendered, local.state, moves)
+    assigned = sorted(str(e.path) for e in entities if e.provisional)
+    return assigned, tree.changes(before, rendered, moves)
 
 
-class Status(BaseModel):
+@dataclass
+class Status:
     interrupted: bool
     report: Report
     plan: Plan | None = None
-    duplicates: list[str] = []
+    duplicates: list[str] = field(default_factory=list)
 
 
 def status(client: MetabaseClient, root: Path) -> Status:
     tree.require(root)
     local = read_tree(root)
-    result = Status(interrupted=bool(Journal(root).entries()), report=validate(local))
+    config = load_config(root)
+    result = Status(
+        interrupted=bool(Journal(root).entries()),
+        report=validate(local, config.collections),
+    )
     if result.interrupted or result.report.errors:
         return result
-    config = load_config(root)
     remote = connect(client, config, local)
     result.plan = build_plan(local, remote, config.removal, config.collections)
     groups: dict[tuple[str, str, int | None], list[RemoteItem]] = {}

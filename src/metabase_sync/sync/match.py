@@ -15,7 +15,7 @@ from metabase_sync.format.representations import (
 from metabase_sync.format.representations.dashboard import Dashboard
 from metabase_sync.format.representations.subscription import Subscription
 from metabase_sync.metabase.remote import Remote
-from metabase_sync.store.tree import Entity, LocalTree
+from metabase_sync.store.tree import Entity, LocalTree, ancestors
 
 
 def find_imports(tree: LocalTree, remote: Remote) -> tuple[dict[str, str], set[str]]:
@@ -23,7 +23,7 @@ def find_imports(tree: LocalTree, remote: Remote) -> tuple[dict[str, str], set[s
     pending = [
         e
         for e in tree.entities.values()
-        if e.entity_id not in tree.managed and index.find(e.entity_id) is None
+        if e.entity_id not in tree.state and index.find(e.entity_id) is None
     ]
     renames: dict[str, str] = {}
     ambiguous: set[str] = set()
@@ -36,19 +36,21 @@ def find_imports(tree: LocalTree, remote: Remote) -> tuple[dict[str, str], set[s
             if item.entity_id
             and not item.document_id
             and item.entity_id not in tree.entities
-            and item.entity_id not in tree.managed
+            and item.entity_id not in tree.state
         }
         for kind in {e.kind for e in pending}
     }
+    by_identity: dict[tuple[str, Any], list[str]] = {}
+    for kind, candidates in candidates_by_kind.items():
+        for eid, item in candidates.items():
+            by_identity.setdefault((kind, _identity(kind, item, {})), []).append(eid)
     for group in _match_groups(pending, tree):
         claims: dict[str, list[Entity]] = {}
+        claimed = set(renames.values())
         for entity in group:
-            wanted = _identity(entity.kind, entity.data, renames)
+            wanted = (entity.kind, _identity(entity.kind, entity.data, renames))
             candidates = [
-                eid
-                for eid, item in candidates_by_kind[entity.kind].items()
-                if eid not in renames.values()
-                and _identity(entity.kind, item, {}) == wanted
+                eid for eid in by_identity.get(wanted, []) if eid not in claimed
             ]
             if len(candidates) == 1:
                 claims.setdefault(candidates[0], []).append(entity)
@@ -76,17 +78,11 @@ def renamed(tree: LocalTree, renames: dict[str, str]) -> LocalTree:
 
 
 def _match_groups(entities: list[Entity], tree: LocalTree) -> list[list[Entity]]:
-    def depth(entity: Entity) -> int:
-        seen, cursor = 0, tree.get(representations.collection_of(entity.data))
-        while cursor is not None and seen < 100:
-            seen += 1
-            cursor = tree.get(representations.collection_of(cursor.data))
-        return seen
-
     collections: dict[int, list[Entity]] = {}
     for entity in entities:
         if entity.kind == COLLECTION:
-            collections.setdefault(depth(entity), []).append(entity)
+            depth = len(ancestors(tree.entities, entity))
+            collections.setdefault(depth, []).append(entity)
     groups = [collections[level] for level in sorted(collections)]
     for kind in (SNIPPET, DASHBOARD, CARD, SUBSCRIPTION):
         groups.append([e for e in entities if e.kind == kind])
@@ -103,7 +99,7 @@ def _identity(kind: str, item: Item, renames: dict[str, str]) -> Any:
             json.dumps([c.channel_type, c.details, c.recipients], sort_keys=True)
             for c in item.channels
         )
-        return places, destinations
+        return places, tuple(destinations)
     return item.name, places
 
 

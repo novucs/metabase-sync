@@ -1,5 +1,7 @@
 import uuid
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import AfterValidator
 
 UUID_NAMESPACE = uuid.UUID("5f1b8c2e-6a4d-4c3b-9e7f-0d2a1b3c4e5f")
 LINK_IDENTITY = ("id", "model")
@@ -11,6 +13,9 @@ def sort_keys(value: Any) -> Any:
     if isinstance(value, list):
         return [sort_keys(v) for v in value]
     return value
+
+
+type SortedKeys[T] = Annotated[T, AfterValidator(sort_keys)]
 
 
 def link_identity(settings: dict[str, Any]) -> dict[str, Any]:

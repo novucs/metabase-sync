@@ -4,10 +4,10 @@ from metabase_sync.metabase.remote import Remote
 from metabase_sync.store.tree import LocalTree
 from metabase_sync.sync.compare import compare
 from metabase_sync.sync.match import find_imports, renamed
-from metabase_sync.sync.operations import ARCHIVE, RESTORE, Plan, Ref
+from metabase_sync.sync.operations import ARCHIVE, POSITIVE, RESTORE, Plan, Ref
 from metabase_sync.sync.order import ordered
 from metabase_sync.sync.remove import removals
-from metabase_sync.sync.validate import remote_problems
+from metabase_sync.sync.validate import remote_problems, unknown_tables_and_fields
 
 
 def build_plan(
@@ -23,6 +23,10 @@ def build_plan(
     if problems:
         raise ValidationFailed(problems)
     compared = compare(tree, remote, ambiguous, force)
+    writing = {op.entity_id for op in compared.operations if op.action in POSITIVE}
+    problems = unknown_tables_and_fields(tree, remote, writing)
+    if problems:
+        raise ValidationFailed(problems)
     restores = [op for op in compared.operations if op.action == RESTORE]
     removed = removals(tree, remote, removal, restores, force)
     return Plan(
@@ -45,5 +49,5 @@ def unmanaged(tree: LocalTree, remote: Remote) -> list[Ref]:
         for item in remote.index.live(kind)
         if item.entity_id
         and item.entity_id not in tree.entities
-        and item.entity_id not in tree.managed
+        and item.entity_id not in tree.state
     ]

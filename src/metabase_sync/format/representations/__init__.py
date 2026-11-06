@@ -24,13 +24,14 @@ KINDS: dict[str, type[Item]] = {
     DASHBOARD: Dashboard,
     SUBSCRIPTION: Subscription,
 }
-SERDES_MODELS: dict[type[Item], str] = {
-    Collection: "Collection",
-    Snippet: "NativeQuerySnippet",
-    Card: "Card",
-    Dashboard: "Dashboard",
-    Subscription: "Pulse",
+MODELS: dict[str, str] = {
+    "Collection": COLLECTION,
+    "NativeQuerySnippet": SNIPPET,
+    "Card": CARD,
+    "Dashboard": DASHBOARD,
+    "Pulse": SUBSCRIPTION,
 }
+SERDES_MODELS = {KINDS[kind]: model for model, kind in MODELS.items()}
 CONTAINERS: dict[str, dict[str, str]] = {
     COLLECTION: {"parent_id": COLLECTION},
     SNIPPET: {},
@@ -46,10 +47,7 @@ def kind_of(data: dict[str, Any]) -> str | None:
     meta = data.get("serdes/meta")
     last = meta[-1] if isinstance(meta, list) and meta else None
     model = last.get("model") if isinstance(last, dict) else None
-    return next(
-        (k for k, cls in KINDS.items() if SERDES_MODELS[cls] == model),
-        None,
-    )
+    return MODELS.get(model) if isinstance(model, str) else None
 
 
 def read(data: dict[str, Any], kind: str, where: object) -> Item:
@@ -57,7 +55,8 @@ def read(data: dict[str, Any], kind: str, where: object) -> Item:
     try:
         return KINDS[kind].model_validate(fields, strict=True, extra="forbid")
     except ValidationError as error:
-        raise ValidationFailed([f"{where}: {p}" for p in describe(error)]) from None
+        problems = describe(error, KINDS[kind])
+        raise ValidationFailed([f"{where}: {p}" for p in problems]) from None
 
 
 def write(item: Item) -> dict[str, Any]:

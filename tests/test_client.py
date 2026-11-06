@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 from metabase_sync.errors import MetabaseSyncError, UnsupportedVersionError
-from metabase_sync.format.api import VERSIONS
-from metabase_sync.metabase.client import TESTED, MetabaseClient, UncertainWriteError
+from metabase_sync.format.api import VERSIONS, for_version
+from metabase_sync.metabase.client import MetabaseClient, UncertainWriteError
 from metabase_sync.settings import Settings
 from metabase_sync.store import yamlio
 
@@ -36,6 +36,8 @@ def serve() -> Iterator[
                 status, body = answer
                 data = json.dumps(body).encode()
                 self.send_response(status)
+                if status == 302:
+                    self.send_header("Location", "http://elsewhere.test/api/card")
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
@@ -43,14 +45,15 @@ def serve() -> Iterator[
 
             do_GET = do_POST = do_PUT = do_DELETE = handle_one
 
-            def log_message(self, *args: object) -> None:
+            def log_message(self, format: str, *args: object) -> None:
                 pass
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
         servers.append(server)
         url = f"http://127.0.0.1:{server.server_address[1]}"
-        return MetabaseClient(Settings(url=url, api_key="k")), seen
+        settings = Settings.model_validate({"url": url, "api_key": "k"})
+        return MetabaseClient(settings), seen
 
     yield start
     for server in servers:
@@ -77,7 +80,8 @@ def test_a_create_is_never_resent_when_its_outcome_is_unknown(serve):
 
 
 def test_a_create_that_cannot_connect_is_not_reported_as_uncertain():
-    client = MetabaseClient(Settings(url="http://127.0.0.1:1", api_key="k"), retries=0)
+    settings = Settings.model_validate({"url": "http://127.0.0.1:1", "api_key": "k"})
+    client = MetabaseClient(settings, retries=0)
 
     with pytest.raises(MetabaseSyncError) as raised:
         client.post("/api/card", {"name": "x"})
@@ -91,13 +95,23 @@ def test_a_delete_whose_retry_finds_nothing_has_succeeded(serve):
     assert seen == ["DELETE", "DELETE"]
 
 
+def test_a_redirect_is_reported_instead_of_followed_with_the_api_key(serve):
+    client, seen = serve(lambda m, n: (302, {}))
+
+    with pytest.raises(MetabaseSyncError) as raised:
+        client.get("/api/card")
+
+    assert "http://elsewhere.test/api/card" in str(raised.value)
+    assert seen == ["GET"]
+
+
 def test_enterprise_versions_are_checked_like_open_source_ones(serve, caplog):
     old, _ = serve(lambda m, n: (200, {"version": {"tag": "v1.57.3"}}))
     new, _ = serve(lambda m, n: (200, {"version": {"tag": "v1.64.4"}}))
 
     with pytest.raises(UnsupportedVersionError):
-        _ = old.supported_version
-    assert new.supported_version == (64, "v1.64.4")
+        for_version(*old.supported_version)
+    assert for_version(*new.supported_version) is VERSIONS[64]
     assert not caplog.records
 
 
@@ -106,5 +120,4 @@ def test_ci_runs_the_integration_suite_on_every_tested_version():
     workflow = yamlio.read(root / ".github" / "workflows" / "ci.yml")
     images = workflow["jobs"]["integration"]["strategy"]["matrix"]["metabase"]
 
-    assert sorted(int(image.split(".")[1]) for image in images) == list(TESTED)
-    assert sorted(VERSIONS) == list(TESTED)
+    assert sorted(int(image.split(".")[1]) for image in images) == sorted(VERSIONS)

@@ -4,9 +4,10 @@ from metabase_sync.format.representations.snippet import Snippet
 from metabase_sync.metabase.index import Index
 
 ENDPOINT = "/api/native-query-snippet"
-LISTING: dict[str, object] = {}
+LISTING: dict[str, str] = {}
 CONTAINER = None
 FIXED: frozenset[str] = frozenset()
+RESET_WHEN_OMITTED: frozenset[str] = frozenset()
 
 
 class Response(BaseModel):
