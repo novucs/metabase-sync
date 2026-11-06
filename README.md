@@ -48,11 +48,17 @@ To manage just one collection, use `metabase-sync init --collection "Finance"`.
 
 ## Usage
 
-**Changed something in Metabase?** Pull it into the files:
+**Changed something in Metabase?** Export it into the files. `export` shows what it will write and asks first:
 
 ```
 $ metabase-sync export
-Updated 2 files (1 added, 1 changed).
+  ~ collections/main/sales/orders_by_month.yaml
+
+Export: 1 to change.
+
+Write these files? [y/N]: y
+
+Files written.
 ```
 
 **Changed the files?** Apply them. `apply` shows what will change and asks first:
@@ -73,15 +79,7 @@ Applied 1 change.
 
 A new file creates an item. Deleting a file archives the item, unless something that stays still uses it; then `plan` tells you what.
 
-**Changed both?** metabase-sync keeps track of what each side changed since the last sync, in `metabase-sync.state`. Keep that file with the others.
-
-| Your files | Metabase  | `export`             | `apply`             |
-|------------|-----------|----------------------|---------------------|
-| unchanged  | changed   | takes Metabase's     | leaves it alone     |
-| changed    | unchanged | keeps yours          | applies yours       |
-| changed    | changed   | stops                | stops               |
-
-`--force` picks one side for everything: `export --force` takes Metabase's version, and `apply --force` takes yours.
+**Changed both?** `export` makes the files match Metabase, and `apply` makes Metabase match the files, like Terraform. Both show what they'll overwrite and ask first. Run `export` first to keep changes made in Metabase, or `apply` first to keep your edits. metabase-sync records what changed since the last sync in `metabase-sync.state`. Keep that file with the others.
 
 `metabase-sync status` shows where things stand. `metabase-sync --help` lists every command and option.
 
@@ -110,18 +108,18 @@ For several Metabase instances, use one folder each and run with `--chdir`.
 
 ## CI
 
-[`examples/`](examples/) has GitHub Actions workflows to plan on pull requests, apply on merge, and check for changes made in Metabase. Use `apply --auto-approve` in CI.
+[`examples/`](examples/) has GitHub Actions workflows to plan on pull requests, apply on merge, and check for changes made in Metabase. Use `--auto-approve` with `apply` and `export` in CI.
 
 | Exit code | Meaning                                                      |
 |-----------|--------------------------------------------------------------|
 | 0         | Success, no changes                                          |
-| 1         | Error, conflict, or apply declined                           |
+| 1         | Error, conflict, or confirmation declined                    |
 | 2         | `plan --detailed-exitcode` or `export --check` found changes |
 | 130       | Interrupted                                                  |
 
 ## Good to know
 
-- `apply` never overwrites a change made in Metabase without `--force`.
+- The next `apply`, including one in CI, undoes changes made in Metabase that nobody exported. The drift detection example exports them nightly.
 - An interrupted `export` or `apply` is safe to run again.
 - A plan saved with `plan --out` won't apply if anything changed since.
 - Not managed: permissions, users, groups, alerts, segments, legacy metrics, public links, personal collections, and the questions inside documents.

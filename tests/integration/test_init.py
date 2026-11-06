@@ -2,10 +2,10 @@ import pytest
 
 from metabase_sync.store import yamlio
 from metabase_sync.store.tree import read_tree
-from metabase_sync.sync import commands as workflow
 
 from ..test_cli import run
 from ._content import unique
+from .test_roundtrip import export
 
 pytestmark = pytest.mark.integration
 
@@ -30,7 +30,7 @@ def test_init_finds_a_collection_by_name(client, mb, tmp_path, monkeypatch, conn
         "--collection",
         child["name"].upper(),
     )
-    workflow.export(client, tmp_path)
+    export(client, tmp_path)
 
     assert code == 0
     assert yamlio.read(tmp_path / "metabase-sync.yaml")["collections"] == [

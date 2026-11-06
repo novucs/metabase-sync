@@ -265,7 +265,7 @@ def render(entities: list[Entity]) -> dict[Path, str]:
 class Changes:
     added: list[str]
     changed: list[str]
-    moved: list[str]
+    moved: list[tuple[str, str]]
     removed: list[str]
 
     @property
@@ -290,7 +290,7 @@ def changes(
             for p in rendered.keys() & current.keys()
             if rendered[p] != current[p]
         ),
-        moved=sorted(f"{old} -> {new}" for old, new in moved.items()),
+        moved=sorted((str(old), str(new)) for old, new in moved.items()),
         removed=sorted(str(p) for p in current.keys() - rendered.keys() - moved.keys()),
     )
 

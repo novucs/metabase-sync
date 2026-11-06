@@ -7,7 +7,6 @@ from metabase_sync.errors import (
     ApiError,
     ApplyStopped,
     BlockedError,
-    ConflictError,
     NotKeptError,
     ValidationFailed,
 )
@@ -23,7 +22,7 @@ from metabase_sync.sync import apply as executor_module
 from metabase_sync.sync import commands as workflow
 
 from ._content import build_rich, unique
-from .test_roundtrip import describe, scope
+from .test_roundtrip import describe, export, scope
 from .test_scenarios import apply, assert_clean, exported, native_card, path_of
 
 pytestmark = pytest.mark.integration
@@ -79,10 +78,10 @@ def test_restoring_a_subscription_keeps_skip_if_empty(client, mb, tmp_path):
     rich, root = exported(client, mb, tmp_path)
     pulse = f"/api/pulse/{rich.pulse['id']}"
     mb.put(pulse, {"skip_if_empty": True})
-    workflow.export(client, root)
+    export(client, root)
     mb.put(pulse, {"archived": True, "skip_if_empty": True})
 
-    apply(client, root, force=True)
+    apply(client, root)
 
     restored = mb.get(pulse)
     assert (restored["archived"], restored["skip_if_empty"]) == (False, True)
@@ -147,17 +146,18 @@ def test_a_new_question_on_an_existing_dashboard_is_placed_once(client, mb, tmp_
     assert_clean(client, root)
 
 
-def test_a_card_archived_in_the_ui_is_left_alone_and_export_takes_it(
+def test_a_card_archived_in_the_ui_is_marked_and_export_keeps_it_archived(
     client, mb, tmp_path
 ):
     rich, root = exported(client, mb, tmp_path)
     mb.archive_card(rich.gui["id"])
 
     _, plan = workflow.plan(client, root)
-    apply(client, root)
-    result = workflow.export(client, root)
+    result = export(client, root)
 
-    assert plan.empty
+    assert ("restore", rich.gui["entity_id"]) in [
+        (op.action, op.entity_id) for op in plan.operations
+    ]
     assert (rich.gui["entity_id"], "archived in Metabase") in [
         (d.entity_id, d.change) for d in plan.drift
     ]
@@ -167,13 +167,13 @@ def test_a_card_archived_in_the_ui_is_left_alone_and_export_takes_it(
     assert_clean(client, root)
 
 
-def test_force_restores_a_card_archived_in_the_ui_with_its_dashcard(
+def test_apply_restores_a_card_archived_in_the_ui_with_its_dashcard(
     client, mb, tmp_path
 ):
     rich, root = exported(client, mb, tmp_path)
     mb.archive_card(rich.gui["id"])
 
-    apply(client, root, force=True)
+    apply(client, root)
 
     assert mb.get(f"/api/card/{rich.gui['id']}")["archived"] is False
     assert rich.gui["id"] in [
@@ -183,19 +183,19 @@ def test_force_restores_a_card_archived_in_the_ui_with_its_dashcard(
     assert_clean(client, root)
 
 
-def test_force_restores_a_dashboard_archived_in_the_ui_once(client, mb, tmp_path):
+def test_apply_restores_a_dashboard_archived_in_the_ui_once(client, mb, tmp_path):
     rich, root = exported(client, mb, tmp_path)
     mb.put(f"/api/dashboard/{rich.dashboard['id']}", {"archived": True})
 
-    _, plan = workflow.plan(client, root, force=True)
-    apply(client, root, force=True)
+    _, plan = workflow.plan(client, root)
+    apply(client, root)
 
     assert ("restore", "dashboard") in [(op.action, op.kind) for op in plan.operations]
     restored = mb.get(f"/api/dashboard/{rich.dashboard['id']}")
     assert restored["archived"] is False
     assert restored["collection_id"] == rich.collection["id"]
     assert_clean(client, root)
-    assert workflow.export(client, root, check=True).clean
+    assert workflow.pull(client, root).files.empty
 
 
 def test_removing_a_subscription_on_a_dashboard_archived_in_the_ui_archives_it(
@@ -224,7 +224,7 @@ def test_an_attachment_set_in_the_ui_survives_an_edit_from_the_files(
         f"/api/pulse/{pulse_id}",
         {"cards": [{**cards[0], "include_csv": True}, *cards[1:]]},
     )
-    workflow.export(client, root)
+    export(client, root)
     edit(
         sub_path,
         lambda d: d["channels"][0]["recipients"].append("new@example.com"),
@@ -404,7 +404,7 @@ def test_a_reference_to_a_field_that_no_longer_exists_is_kept(client, mb, tmp_pa
         },
     )
 
-    result = workflow.export(client, root)
+    result = export(client, root)
 
     name = rich.native["name"]
     gone = f"card {name!r} uses field 999999, which no longer exists in the database"
@@ -532,7 +532,22 @@ def test_two_files_matching_one_item_stop_as_conflicts(client, mb, tmp_path):
     assert rich.model["entity_id"] not in plan.renames.values()
 
 
-def test_export_before_apply_keeps_a_hand_written_file_for_an_existing_item(
+def test_an_edit_force_leaves_out_stays_unapplied_for_export_to_mark(
+    client, mb, tmp_path
+):
+    rich, root = exported(client, mb, tmp_path)
+    native = path_of(root, rich.native["entity_id"])
+    edit(native, lambda d: d.update(description="not applied yet"))
+    elsewhere = mb.create_collection(unique("Elsewhere"))
+    mb.update_card(rich.native["id"], {"collection_id": elsewhere["id"]})
+
+    apply(client, root, force=True)
+    preview = workflow.pull(client, root)
+
+    assert preview.overwrites == {str(native.relative_to(root)): "deletes your edit"}
+
+
+def test_export_marks_a_hand_written_file_it_overwrites_for_an_existing_item(
     client, mb, tmp_path
 ):
     rich, root = exported(client, mb, tmp_path)
@@ -543,21 +558,19 @@ def test_export_before_apply_keeps_a_hand_written_file_for_an_existing_item(
     hand = original.with_name("by_hand.yaml")
     yamlio.write(hand, {**data, "entity_id": new_entity_id(), "description": "by hand"})
 
-    workflow.export(client, root)
+    preview = workflow.pull(client, root)
+    workflow.write(root, preview)
 
+    assert preview.overwrites == {
+        str(original.relative_to(root)): "overwrites your edit"
+    }
     named = [
         (e.path, e.data.description)
         for e in read_tree(root).entities.values()
         if isinstance(e.data, Card) and e.name == data["name"]
     ]
-    assert named == [(hand.relative_to(root), "by hand")]
-    apply(client, root)
-    cards = [
-        c
-        for c in mb.get("/api/card")
-        if c["name"] == data["name"] and c["collection_id"] == rich.collection["id"]
-    ]
-    assert [c["description"] for c in cards] == ["by hand"]
+    assert named == [(original.relative_to(root), data.get("description"))]
+    assert_clean(client, root)
 
 
 def test_a_question_inside_a_document_is_left_alone_and_listed_as_unmanaged(
@@ -585,10 +598,10 @@ def test_a_question_inside_a_document_is_left_alone_and_listed_as_unmanaged(
         },
     )
 
-    result = workflow.export(client, root)
+    result = export(client, root)
     _, plan = workflow.plan(client, root)
 
-    assert result.clean
+    assert result.files.empty
     assert plan.empty
     assert "Inside the notes" in [ref.name for ref in plan.unmanaged]
 
@@ -616,55 +629,45 @@ def test_a_whole_tree_written_without_ids_imports_by_name(client, mb, tmp_path):
     assert set(read_tree(root).entities) == set(local.entities)
 
 
-def test_export_force_never_deletes_a_file_it_cannot_read(client, mb, tmp_path):
+def test_export_never_deletes_a_file_it_cannot_read(client, mb, tmp_path):
     rich, root = exported(client, mb, tmp_path)
     broken = path_of(root, rich.native["entity_id"]).with_name("draft.yaml")
     broken.write_text("name: [unclosed\n", encoding="utf-8")
 
     with pytest.raises(ValidationFailed):
-        workflow.export(client, root, force=True)
+        export(client, root)
 
     assert broken.exists()
 
 
-def test_export_keeps_edits_and_new_files_you_have_not_applied(client, mb, tmp_path):
+def test_export_takes_metabase_marks_unapplied_edits_and_keeps_new_files(
+    client, mb, tmp_path
+):
     rich, root = exported(client, mb, tmp_path)
     native = path_of(root, rich.native["entity_id"])
     edit(native, lambda d: d.update(description="not applied yet"))
     folder = path_of(root, rich.collection["entity_id"]).with_suffix("")
-    yamlio.write(
-        folder / "draft.yaml",
-        native_card("Draft", "SELECT 5", rich.collection["entity_id"]),
-    )
+    draft = folder / "draft.yaml"
+    yamlio.write(draft, native_card("Draft", "SELECT 5", rich.collection["entity_id"]))
     mb.update_card(rich.derived["id"], {"description": "edited in the UI"})
+    mb.update_card(rich.native["id"], {"description": "edited in the UI too"})
 
-    result = workflow.export(client, root)
-
+    preview = workflow.pull(client, root)
     assert yamlio.read(native)["description"] == "not applied yet"
-    assert (folder / "draft.yaml").exists()
-    assert str(native.relative_to(root)) in result.kept
+    workflow.write(root, preview)
+
+    assert preview.overwrites == {str(native.relative_to(root)): "overwrites your edit"}
+    assert preview.new == [str(draft.relative_to(root))]
+    assert yamlio.read(native)["description"] == "edited in the UI too"
     assert yamlio.read(path_of(root, rich.derived["entity_id"]))["description"] == (
         "edited in the UI"
     )
+    assert draft.exists()
 
 
-def test_export_refuses_a_conflict_and_force_takes_metabase(client, mb, tmp_path):
+def test_apply_puts_back_an_edit_made_in_the_ui(client, mb, tmp_path):
     rich, root = exported(client, mb, tmp_path)
-    native = path_of(root, rich.native["entity_id"])
-    edit(native, lambda d: d.update(description="edited in the files"))
-    mb.update_card(rich.native["id"], {"description": "edited in the UI"})
-
-    refused = workflow.export(client, root)
-    assert yamlio.read(native)["description"] == "edited in the files"
-    workflow.export(client, root, force=True)
-
-    assert [c.change for c in refused.conflicts] == ["changed here and in Metabase"]
-    assert yamlio.read(native)["description"] == "edited in the UI"
-    assert_clean(client, root)
-
-
-def test_apply_leaves_an_edit_made_in_the_ui_alone(client, mb, tmp_path):
-    rich, root = exported(client, mb, tmp_path)
+    before = yamlio.read(path_of(root, rich.derived["entity_id"])).get("description")
     edit(
         path_of(root, rich.native["entity_id"]),
         lambda d: d.update(description="edited in the files"),
@@ -674,18 +677,15 @@ def test_apply_leaves_an_edit_made_in_the_ui_alone(client, mb, tmp_path):
     _, plan = workflow.plan(client, root)
     apply(client, root)
 
-    assert [op.name for op in plan.operations] == [rich.native["name"]]
-    assert [d.entity_id for d in plan.drift] == [rich.derived["entity_id"]]
-    assert mb.get(f"/api/card/{rich.derived['id']}")["description"] == (
-        "edited in the UI"
+    assert sorted(op.name for op in plan.operations) == sorted(
+        [rich.native["name"], rich.derived["name"]]
     )
-    _, after = workflow.plan(client, root)
-    assert after.empty and [d.entity_id for d in after.drift] == [
-        rich.derived["entity_id"]
-    ]
+    assert [d.entity_id for d in plan.drift] == [rich.derived["entity_id"]]
+    assert mb.get(f"/api/card/{rich.derived['id']}")["description"] == before
+    assert_clean(client, root)
 
 
-def test_apply_refuses_a_conflict_until_forced(client, mb, tmp_path):
+def test_apply_takes_the_files_version_over_edits_on_both_sides(client, mb, tmp_path):
     rich, root = exported(client, mb, tmp_path)
     edit(
         path_of(root, rich.native["entity_id"]),
@@ -693,12 +693,7 @@ def test_apply_refuses_a_conflict_until_forced(client, mb, tmp_path):
     )
     mb.update_card(rich.native["id"], {"description": "edited in the UI"})
 
-    with pytest.raises(ConflictError):
-        apply(client, root)
-    assert mb.get(f"/api/card/{rich.native['id']}")["description"] == (
-        "edited in the UI"
-    )
-    apply(client, root, force=True)
+    apply(client, root)
 
     assert mb.get(f"/api/card/{rich.native['id']}")["description"] == (
         "edited in the files"
@@ -745,7 +740,7 @@ def test_removal_delete_deletes_only_what_the_plan_names(client, mb, tmp_path):
         root / "metabase-sync.yaml",
         {"collections": [rich.collection["entity_id"]], "removal": "delete"},
     )
-    workflow.export(client, root)
+    export(client, root)
     holder_path = path_of(root, holder["entity_id"])
     holder_file = holder_path.read_text()
     for item in (card, board, inner, doomed, holder):
@@ -798,7 +793,7 @@ def test_removal_delete_keeps_subscriptions_and_timelines_it_does_not_manage(
         root / "metabase-sync.yaml",
         {"collections": [rich.collection["entity_id"]], "removal": "delete"},
     )
-    workflow.export(client, root)
+    export(client, root)
     pulse = mb.create_pulse(
         board["name"],
         dashboard_id=board["id"],
@@ -909,7 +904,7 @@ def test_an_action_button_survives_an_update_from_the_files(client, mb, tmp_path
         ],
     )
     root = scope(tmp_path / "root", rich.collection["entity_id"])
-    result = workflow.export(client, root)
+    result = export(client, root)
     edit(
         path_of(root, board["entity_id"]),
         lambda d: d["dashcards"][0].update(row=2),

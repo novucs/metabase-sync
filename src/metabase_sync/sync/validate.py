@@ -240,7 +240,7 @@ def outside_scope(tree: LocalTree, remote: Remote, scope: set[str] | None) -> li
     problem = (
         f"{count(len(outside), 'file')} {verb} outside the collections listed under "
         f"`collections:` in {CONFIG}, such as {outside[0]}; move {them} into one of "
-        f"those collections, or run `metabase-sync export` to remove {them}"
+        f"those collections, or delete {them}"
     )
     return [problem]
 

@@ -64,6 +64,7 @@ class Need:
 @dataclass
 class Removed:
     operations: list[Operation] = field(default_factory=list)
+    drift: list[Drift] = field(default_factory=list)
     conflicts: list[Drift] = field(default_factory=list)
     blocked: list[Drift] = field(default_factory=list)
     cascaded: list[Ref] = field(default_factory=list)
@@ -160,9 +161,7 @@ def removals(
     }
     in_documents = {key for key in only_here if graph.nodes[key][1].document_id}
     only_here -= in_documents
-    leaving, held_back = removed_from_files(
-        tree, remote, graph, removal, force, removed
-    )
+    leaving = removed_from_files(tree, remote, graph, removal, removed)
 
     homes = (
         managed_containers(tree, graph, whole_instance)
@@ -214,12 +213,9 @@ def removals(
                 hard = [
                     need
                     for need in who
-                    if need.source not in held_back
-                    and (
-                        need.source is None
-                        or need.source not in only_here
-                        or need.source in vital
-                    )
+                    if need.source is None
+                    or need.source not in only_here
+                    or need.source in vital
                 ]
                 if hard:
                     removed.blocked.append(_drift(graph, key, f"but {_joined(hard)}"))
@@ -235,11 +231,17 @@ def removals(
                     )
                 elif who and not force:
                     verb = "is" if len(who) == 1 else "are"
+                    effect = (
+                        "--force removes it and its contents"
+                        if any(need.holds for need in who)
+                        else "--force removes it anyway"
+                    )
                     removed.conflicts.append(
                         _drift(
                             graph,
                             key,
-                            f"but {_joined(who)}, which {verb} not in the files",
+                            f"but {_joined(who)}, which {verb} not in the files "
+                            f"({effect})",
                         )
                     )
                 else:
@@ -281,15 +283,9 @@ def removals(
 
 
 def removed_from_files(
-    tree: LocalTree,
-    remote: Remote,
-    graph: Graph,
-    removal: str,
-    force: bool,
-    removed: Removed,
-) -> tuple[dict[Key, str], set[Key]]:
+    tree: LocalTree, remote: Remote, graph: Graph, removal: str, removed: Removed
+) -> dict[Key, str]:
     leaving: dict[Key, str] = {}
-    held_back: set[Key] = set()
     for eid in sorted(tree.state.keys() - tree.entities.keys()):
         key = graph.key(eid)
         if key is None:
@@ -298,12 +294,12 @@ def removed_from_files(
         prior = tree.prior(eid)
         theirs = representations.comparable(remote.item(kind, item))
         if classify(prior, None, remote_hash(prior, theirs, {})) == CONFLICT:
-            removed.conflicts.append(_drift(graph, key, "changed in Metabase"))
-            if not force:
-                held_back.add(key)
-                continue
+            ref = _ref(graph, key).model_dump()
+            removed.drift.append(
+                Drift(**ref, change="removed here, changed in Metabase")
+            )
         leaving[key] = removal
-    return leaving, held_back
+    return leaving
 
 
 def managed_containers(tree: LocalTree, graph: Graph, whole_instance: bool) -> set[Key]:

@@ -23,22 +23,28 @@ def describe(plan: Plan) -> list[tuple[str, str, str, list[str]]]:
     return [(op.action, op.kind, op.name, op.changes) for op in plan.operations]
 
 
+def export(client, root: Path) -> workflow.ExportResult:
+    result = workflow.pull(client, root)
+    workflow.write(root, result)
+    return result
+
+
 def test_export_then_plan_is_empty(client, mb, tmp_path):
     rich = build_rich(mb)
     root = scope(tmp_path / "root", rich.collection["entity_id"])
 
-    result = workflow.export(client, root)
+    result = export(client, root)
     _, plan = workflow.plan(client, root)
 
     assert len(result.files.added) >= 9
     assert plan.empty, describe(plan)
-    assert workflow.export(client, root, check=True).clean
+    assert workflow.pull(client, root).files.empty
 
 
 def test_exported_files_pass_metabases_representation_validator(client, mb, tmp_path):
     rich = build_rich(mb)
     root = scope(tmp_path / "root", rich.collection["entity_id"])
-    workflow.export(client, root)
+    export(client, root)
 
     validated = subprocess.run(
         [

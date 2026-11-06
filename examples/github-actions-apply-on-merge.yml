@@ -26,7 +26,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
 
       - name: Install metabase-sync
-        run: uv tool install metabase-sync==0.4.0
+        run: uv tool install metabase-sync==0.4.3
 
       - name: Apply
         working-directory: metabase

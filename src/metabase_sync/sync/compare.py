@@ -102,10 +102,13 @@ def _compare_one(
     if hit is None and remote.index.is_outside(eid):
         compared.conflicts.append(
             drift(
-                "lost its channels, or its dashboard moved out of the managed "
-                "collections, in Metabase"
-                if entity.kind == SUBSCRIPTION
-                else "moved out of the managed collections in Metabase"
+                (
+                    "lost its channels, or its dashboard moved out of the managed "
+                    "collections, in Metabase"
+                    if entity.kind == SUBSCRIPTION
+                    else "moved out of the managed collections in Metabase"
+                )
+                + " (--force skips it)"
             )
         )
         return
@@ -113,25 +116,17 @@ def _compare_one(
         compared.operations.append(operation(IMPORT))
     if state == SAME:
         return
-    if state in (THEIRS, CONFLICT):
-        if theirs is not None:
-            compared.diffs[eid] = (
-                render_diff(theirs, local, "metabase", path or "files")
-                if state == CONFLICT
-                else render_diff(local, theirs, path or "files", "metabase")
-            )
-        found = drift(_change(item, state == CONFLICT))
-        (compared.conflicts if state == CONFLICT else compared.drift).append(found)
-        if not force:
-            return
+    labelled = state in (THEIRS, CONFLICT)
+    if labelled:
+        compared.drift.append(drift(_change(item, state == CONFLICT)))
 
     parts = [BASE, CONTENTS] if entity.kind == DASHBOARD else [BASE]
     if theirs is None:
         if ambiguous:
             compared.conflicts.append(
                 drift(
-                    "can't be matched to one item in Metabase by name; set its "
-                    "entity_id to import one, or pass --force to create it"
+                    "matches several items in Metabase by name. Set its entity_id "
+                    "to pick one (--force creates a new one)"
                 )
             )
             if not force:
@@ -139,13 +134,13 @@ def _compare_one(
         compared.operations += [operation(CREATE, part=part) for part in parts]
         return
     if theirs != local:
-        compared.diffs.setdefault(
-            eid, render_diff(theirs, local, "metabase", path or "files")
-        )
+        compared.diffs[eid] = render_diff(theirs, local, "metabase", path or "files")
     if item is not None and item.archived:
         compared.operations.append(
             operation(
-                RESTORE, remote_hash=digest(theirs), reason="archived in Metabase"
+                RESTORE,
+                remote_hash=digest(theirs),
+                reason=None if labelled else "archived in Metabase",
             )
         )
     for part in parts:
@@ -210,16 +205,13 @@ def not_kept(tree: LocalTree, remote: Remote, entity_ids: set[str]) -> list[Drif
     return dropped
 
 
-def _change(item: RemoteItem | None, conflict: bool) -> str:
-    if item is None:
-        return (
-            "changed here, deleted in Metabase" if conflict else "deleted in Metabase"
-        )
-    if item.archived:
-        return (
-            "changed here, archived in Metabase" if conflict else "archived in Metabase"
-        )
-    return "changed here and in Metabase" if conflict else "changed in Metabase"
+def _change(item: RemoteItem | None, here: bool) -> str:
+    there = "deleted" if item is None else "archived" if item.archived else "changed"
+    if not here:
+        return f"{there} in Metabase"
+    if there == "changed":
+        return "changed here and in Metabase"
+    return f"changed here, {there} in Metabase"
 
 
 def remote_view(remote: dict[str, Any], local: dict[str, Any]) -> dict[str, Any]:

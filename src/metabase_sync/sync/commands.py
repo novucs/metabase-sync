@@ -37,20 +37,13 @@ from metabase_sync.store.journal import Journal
 from metabase_sync.store.state import Managed, write_state
 from metabase_sync.store.tree import CONFIG, Changes, Entity, LocalTree, read_tree
 from metabase_sync.sync.apply import Executor, reconcile
-from metabase_sync.sync.compare import not_kept, remote_hash
+from metabase_sync.sync.compare import not_kept, remote_view
 from metabase_sync.sync.match import find_imports, renamed
 from metabase_sync.sync.operations import (
     ARCHIVE,
-    CONFLICT,
-    OURS,
     POSITIVE,
-    SAME,
-    THEIRS,
-    UNMANAGED,
-    Drift,
     Operation,
     Plan,
-    classify,
     digest,
     local_hash,
 )
@@ -156,15 +149,15 @@ def remote_entities(remote: Remote) -> list[Entity]:
 @dataclass
 class ExportResult:
     files: Changes
-    kept: list[str]
-    conflicts: list[Drift]
+    overwrites: dict[str, str]
+    new: list[str]
     warnings: list[str]
     broken: list[str]
     missing: list[str]
-
-    @property
-    def clean(self) -> bool:
-        return self.files.empty and not self.conflicts
+    current: dict[Path, str] = field(repr=False)
+    rendered: dict[Path, str] = field(repr=False)
+    state: dict[str, Managed] = field(repr=False)
+    moves: dict[Path, Path] = field(repr=False)
 
 
 def _not_interrupted(root: Path) -> None:
@@ -175,11 +168,10 @@ def _not_interrupted(root: Path) -> None:
         )
 
 
-def export(
-    client: MetabaseClient, root: Path, check: bool = False, force: bool = False
-) -> ExportResult:
+def pull(client: MetabaseClient, root: Path) -> ExportResult:
     tree.require(root)
     _not_interrupted(root)
+    current = tree.current_files(root)
     local = read_tree(root)
     if local.problems:
         raise ValidationFailed(local.problems)
@@ -187,87 +179,75 @@ def export(
     remote = connect(client, config, local)
     local = renamed(local, find_imports(local, remote)[0])
     pulled = {e.entity_id: e for e in remote_entities(remote)}
-    conflicts: list[Drift] = []
-    unapplied: list[str] = []
-    taken: list[Entity] = []
-    kept: list[Entity] = []
-    state: dict[str, Managed] = {}
-    for eid in sorted(pulled.keys() | local.entities.keys() | local.state.keys()):
-        mine, theirs = local.entities.get(eid), pulled.get(eid)
-        what = mine or theirs
-        if what is None:
-            continue
-        prior = local.prior(eid)
-        ours = representations.comparable(mine.data) if mine else {}
-        situation = classify(
-            prior,
-            digest(ours) if mine else None,
-            remote_hash(prior, representations.comparable(theirs.data), ours)
-            if theirs
-            else None,
-        )
-        if situation == CONFLICT and not force:
-            if mine is None:
-                change = "removed here, changed in Metabase"
-            elif theirs is None:
-                change = "changed here, archived or deleted in Metabase"
-            else:
-                change = "changed here and in Metabase"
-            conflicts.append(
-                Drift(
-                    kind=what.kind,
-                    entity_id=eid,
-                    name=what.name,
-                    path=str(mine.path) if mine else None,
-                    change=change,
-                )
-            )
-            continue
-        if (
-            situation in (SAME, THEIRS, CONFLICT)
-            or (situation == UNMANAGED and mine is None)
-            or (force and (eid in local.state or theirs is not None))
-        ):
-            if theirs is not None:
-                taken.append(theirs)
-                state[eid] = Managed(kind=theirs.kind, hash=local_hash(theirs))
-            continue
-        if mine is not None:
-            kept.append(mine)
-        if eid in local.state:
-            state[eid] = local.state[eid]
-        if situation == OURS or (situation == UNMANAGED and theirs is not None):
-            unapplied.append(
-                str(mine.path) if mine else f"your removal of {what.kind} {what.name!r}"
-            )
-    current = tree.current_files(root)
-    paths = tree.layout([*taken, *kept])
+    new = [
+        e
+        for eid, e in local.entities.items()
+        if eid not in pulled and eid not in local.state
+    ]
+    paths = tree.layout([*pulled.values(), *new])
     rendered = {
-        paths[e.entity_id]: yamlio.dumps(representations.write(e.data)) for e in taken
+        paths[eid]: yamlio.dumps(representations.write(e.data))
+        for eid, e in pulled.items()
     }
-    for e in kept:
+    for e in new:
         path = e.path or paths[e.entity_id]
         if path in rendered:
             raise StateError(
-                f"{path} has unapplied edits and Metabase now puts another item there",
+                f"{path} isn't in Metabase yet, but Metabase has another item there",
                 hint="Run `metabase-sync apply` first, or move the file",
             )
-        rendered[path] = current[path]
+        if path in current:
+            rendered[path] = current[path]
     moves = {
-        mine.path: paths[e.entity_id]
-        for e in taken
-        if (mine := local.entities.get(e.entity_id)) and mine.path
+        mine.path: paths[eid]
+        for eid in pulled
+        if (mine := local.entities.get(eid)) and mine.path
     }
-    if not check and not conflicts:
-        tree.write_tree(root, rendered, state, moves)
     return ExportResult(
         files=tree.changes(current, rendered, moves),
-        kept=unapplied,
-        conflicts=conflicts,
+        overwrites=_overwrites(local, pulled, paths),
+        new=sorted(str(e.path or paths[e.entity_id]) for e in new),
         warnings=list(dict.fromkeys(remote.index.warnings)),
         broken=remote.index.broken,
         missing=remote.index.missing,
+        current=current,
+        rendered=rendered,
+        state={
+            eid: Managed(kind=e.kind, hash=local_hash(e)) for eid, e in pulled.items()
+        },
+        moves=moves,
     )
+
+
+def write(root: Path, result: ExportResult) -> None:
+    if tree.current_files(root) != result.current:
+        raise StateError(
+            "Files changed during export. Nothing was written",
+            hint="Run `metabase-sync export` again",
+        )
+    tree.write_tree(root, result.rendered, result.state, result.moves)
+
+
+def _overwrites(
+    local: LocalTree, pulled: dict[str, Entity], paths: dict[str, Path]
+) -> dict[str, str]:
+    found: dict[str, str] = {}
+    for eid in local.entities.keys() | local.state.keys():
+        mine, theirs, prior = local.entities.get(eid), pulled.get(eid), local.prior(eid)
+        if mine is None:
+            if prior is not None and theirs is not None:
+                found[str(paths[eid])] = "restores a file you deleted"
+        elif local_hash(mine) != prior:
+            if theirs is None and prior is not None and mine.path:
+                found[str(mine.path)] = "deletes your edit"
+            elif theirs is not None and _differs(theirs, mine):
+                found[str(paths[eid])] = "overwrites your edit"
+    return found
+
+
+def _differs(theirs: Entity, mine: Entity) -> bool:
+    ours = representations.comparable(mine.data)
+    return remote_view(representations.comparable(theirs.data), ours) != ours
 
 
 @dataclass
@@ -337,7 +317,7 @@ def plan_apply(
     if result.blocked:
         raise BlockedError(result.blocked)
     if result.conflicts and not force:
-        raise ConflictError(result.conflicts, len(result.drift))
+        raise ConflictError(result.conflicts)
     return prepared, result
 
 
@@ -391,17 +371,14 @@ def _read_plan(path: Path) -> Plan:
 
 
 def _state_after(local: LocalTree, result: Plan) -> dict[str, Managed]:
-    drifted = set() if result.force else result.drifted
+    applied = {op.entity_id for op in result.operations}
+    left_out = {c.entity_id for c in result.conflicts} & local.entities.keys() - applied
     state = {
-        eid: local.state[eid]
-        if eid in drifted and eid in local.state
-        else Managed(kind=entity.kind, hash=local_hash(entity))
+        eid: Managed(kind=entity.kind, hash=local_hash(entity))
         for eid, entity in local.entities.items()
+        if eid not in left_out
     }
-    for eid in drifted - state.keys():
-        if eid in local.state:
-            state[eid] = local.state[eid]
-    return state
+    return state | {eid: local.state[eid] for eid in left_out if eid in local.state}
 
 
 def fmt(root: Path) -> tuple[list[str], Changes]:

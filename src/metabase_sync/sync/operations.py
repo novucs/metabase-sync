@@ -100,10 +100,6 @@ class Plan(BaseModel):
     def empty(self) -> bool:
         return not self.operations
 
-    @property
-    def drifted(self) -> set[str]:
-        return {i.entity_id for i in [*self.drift, *self.conflicts]}
-
 
 def digest(value: Any) -> str:
     return hashlib.sha256(

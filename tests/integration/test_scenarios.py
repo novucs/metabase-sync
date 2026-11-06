@@ -16,7 +16,7 @@ from metabase_sync.sync import apply as executor_module
 from metabase_sync.sync import commands as workflow
 
 from ._content import build_rich, unique
-from .test_roundtrip import describe, scope
+from .test_roundtrip import describe, export, scope
 
 pytestmark = pytest.mark.integration
 
@@ -24,7 +24,7 @@ pytestmark = pytest.mark.integration
 def exported(client, mb, tmp_path):
     rich = build_rich(mb)
     root = scope(tmp_path / "root", rich.collection["entity_id"])
-    workflow.export(client, root)
+    export(client, root)
     return rich, root
 
 
@@ -77,7 +77,7 @@ def test_a_gui_question_with_aggregation_references_round_trips_through_apply(
     scope_all = tmp_path / "all"
     scope_all.mkdir()
     yamlio.write(scope_all / "metabase-sync.yaml", {"removal": "archive"})
-    workflow.export(client, scope_all)
+    export(client, scope_all)
     path = path_of(scope_all, sample["entity_id"])
     data = yamlio.read(path)
     data["description"] = unique("edited")
@@ -92,7 +92,7 @@ def test_a_gui_question_with_aggregation_references_round_trips_through_apply(
     assert mb.get(f"/api/card/{sample['id']}")["description"] == data["description"]
     mb.run_card_query(sample["id"])
     assert_clean(client, scope_all)
-    assert workflow.export(client, scope_all, check=True).clean
+    assert workflow.pull(client, scope_all).files.empty
 
 
 def test_editing_sql_updates_only_that_card(client, mb, tmp_path):
@@ -168,7 +168,7 @@ def test_new_files_are_created_once_and_take_metabase_ids(client, mb, tmp_path):
 def test_a_nested_collection_can_be_managed_on_its_own(client, mb, tmp_path):
     rich = build_rich(mb)
     root = scope(tmp_path / "root", rich.child["entity_id"])
-    workflow.export(client, root)
+    export(client, root)
     local = read_tree(root)
     card_path = path_of(root, rich.gui["entity_id"])
     card = yamlio.read(card_path)
@@ -217,7 +217,7 @@ def test_a_scoped_repo_can_opt_in_to_snippets(client, mb, tmp_path):
         {"collections": [rich.collection["entity_id"]], "snippets": True},
     )
 
-    workflow.export(client, root)
+    export(client, root)
 
     assert rich.snippet["entity_id"] in snippets_in(root)
     assert_clean(client, root)
@@ -231,12 +231,12 @@ def test_snippet_files_left_in_a_scoped_repo_are_refused_until_exported(
     root.mkdir()
     config = {"collections": [rich.collection["entity_id"]], "snippets": True}
     yamlio.write(root / "metabase-sync.yaml", config)
-    workflow.export(client, root)
+    export(client, root)
     yamlio.write(root / "metabase-sync.yaml", {"collections": config["collections"]})
 
     with pytest.raises(ValidationFailed) as refused:
         workflow.plan(client, root)
-    workflow.export(client, root)
+    export(client, root)
 
     assert any("snippets: true" in problem for problem in refused.value.problems)
     assert snippets_in(root) == []
@@ -295,7 +295,7 @@ def test_widening_the_scope_removes_nothing_until_exported(client, mb, tmp_path)
     )
 
     _, plan = workflow.plan(client, root)
-    workflow.export(client, root)
+    export(client, root)
 
     assert plan.empty
     assert card["entity_id"] in [u.entity_id for u in plan.unmanaged]
@@ -345,7 +345,7 @@ def test_removing_a_card_and_its_dashcard_together(client, mb, tmp_path):
     ]
     assert mb.get(f"/api/card/{rich.gui['id']}")["archived"] is True
     assert_clean(client, root)
-    assert workflow.export(client, root, check=True).clean
+    assert workflow.pull(client, root).files.empty
 
 
 def stop_using_gui(root: Path, rich) -> None:
@@ -398,12 +398,10 @@ def test_restoring_files_restores_the_archived_collection(client, mb, tmp_path):
     shutil.rmtree(root)
     shutil.copytree(backup, root)
 
-    _, held = workflow.plan(client, root)
-    _, plan = workflow.plan(client, root, force=True)
-    apply(client, root, force=True)
+    _, plan = workflow.plan(client, root)
+    apply(client, root)
 
-    assert held.empty
-    assert rich.child["entity_id"] in {d.entity_id for d in held.drift}
+    assert rich.child["entity_id"] in {d.entity_id for d in plan.drift}
     assert ("restore", "collection") in [(op.action, op.kind) for op in plan.operations]
     assert mb.get(f"/api/collection/{rich.child['id']}")["archived"] is False
     assert mb.get(f"/api/card/{rich.gui['id']}")["archived"] is False
@@ -554,7 +552,7 @@ def test_duplicate_names_get_stable_file_names(client, mb, tmp_path):
     for _ in range(2):
         mb.create_native_card("Twin", "SELECT 3", collection_id=rich.collection["id"])
     root = scope(tmp_path / "root", rich.collection["entity_id"])
-    workflow.export(client, root)
+    export(client, root)
     first = sorted(
         p.name
         for p in path_of(root, rich.collection["entity_id"])
@@ -562,7 +560,7 @@ def test_duplicate_names_get_stable_file_names(client, mb, tmp_path):
         .glob("twin*.yaml")
     )
     shutil.rmtree(root / "collections")
-    workflow.export(client, root, force=True)
+    export(client, root)
     second = sorted(
         p.name
         for p in path_of(root, rich.collection["entity_id"])

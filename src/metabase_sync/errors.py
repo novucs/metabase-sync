@@ -84,8 +84,8 @@ class StateError(MetabaseSyncError):
 
 
 class ValidationFailed(MetabaseSyncError):
-    def __init__(self, problems: list[str]) -> None:
-        super().__init__(f"{count(len(problems), 'problem')} in the files")
+    def __init__(self, problems: list[str], hint: str | None = None) -> None:
+        super().__init__(f"{count(len(problems), 'problem')} in the files", hint)
         self.problems = problems
 
 
@@ -94,13 +94,10 @@ class StalePlanError(MetabaseSyncError):
 
 
 class ConflictError(MetabaseSyncError):
-    def __init__(self, conflicts: list[Drift], drifted: int = 0) -> None:
-        also = f", including {count(drifted, 'other item')}" if drifted else ""
+    def __init__(self, conflicts: list[Drift]) -> None:
         super().__init__(
             f"{count(len(conflicts), 'conflict')} with Metabase",
-            hint="Run `metabase-sync export --force` to take Metabase's versions "
-            "(commit your edits first to keep them), or pass --force to overwrite "
-            f"every change made in Metabase{also}",
+            hint="Fix them in the files or in Metabase, or run again with --force",
         )
         self.conflicts = conflicts
 

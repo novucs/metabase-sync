@@ -4,10 +4,9 @@ import pytest
 from pydantic import BaseModel
 
 from metabase_sync.store.tree import read_tree
-from metabase_sync.sync import commands
 
 from ._content import build_rich
-from .test_roundtrip import scope
+from .test_roundtrip import export, scope
 
 pytestmark = pytest.mark.integration
 
@@ -43,7 +42,7 @@ def _nested(model: type[BaseModel]) -> set[type[BaseModel]]:
 def test_the_round_trip_content_sets_every_field_we_manage(client, mb, tmp_path):
     rich = build_rich(mb)
     root = scope(tmp_path / "root", rich.collection["entity_id"])
-    commands.export(client, root)
+    export(client, root)
 
     found: dict[str, set[str]] = {}
     models: set[type[BaseModel]] = set()

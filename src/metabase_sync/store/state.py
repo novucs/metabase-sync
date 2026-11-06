@@ -21,7 +21,7 @@ def read_state(root: Path) -> dict[str, Managed]:
         if line.startswith(CONFLICT_MARKERS):
             raise StateError(
                 f"{STATE} has git merge conflict markers",
-                hint="Keep either side of the conflict, then run `metabase-sync export`",
+                hint="Keep either side of the conflict",
             )
         parts = line.split()
         if len(parts) >= 2:

@@ -3,7 +3,7 @@ from typing import Any
 
 import pytest
 
-from metabase_sync.errors import ValidationFailed
+from metabase_sync.errors import StateError, ValidationFailed
 from metabase_sync.format import representations
 from metabase_sync.format.api import v58
 from metabase_sync.format.representations import (
@@ -145,9 +145,12 @@ def test_removing_a_collection_that_holds_unmanaged_items_stops_until_forced():
     forced = plan_for(index, local, force=True)
 
     assert held.empty
-    assert [(c.entity_id, c.change) for c in held.conflicts] == [
-        (eid("b"), "removed here, but holds card 'card c', which is not in the files")
-    ]
+    change = (
+        "removed here, but holds card 'card c', which is not in the files "
+        "(--force removes it and its contents)"
+    )
+    assert [(c.entity_id, c.change) for c in held.conflicts] == [(eid("b"), change)]
+    assert [(c.entity_id, c.change) for c in forced.conflicts] == [(eid("b"), change)]
     assert [op.entity_id for op in forced.operations] == [eid("b")]
     assert [c.entity_id for c in forced.cascaded] == [eid("c")]
 
@@ -261,7 +264,7 @@ def test_a_metabase_collection_is_kept_when_its_managed_dashboard_cannot_be_dele
     assert eid("t") in [k.entity_id for k in plan.kept]
 
 
-def test_items_a_managed_item_uses_in_metabase_are_kept():
+def test_a_question_only_metabases_version_of_a_dashboard_shows_goes_after_it():
     index = remote(
         collection=[collection(1, "a")],
         card=[card(11, "y", 1)],
@@ -293,11 +296,9 @@ def test_items_a_managed_item_uses_in_metabase_are_kept():
     plan = build_plan(local, connected(index), unmanaged="delete")
 
     assert eid("b") in [d.entity_id for d in plan.drift]
-
-    assert eid("y") not in [op.entity_id for op in plan.operations]
-    assert (eid("y"), "used by dashboard 'board'") in [
-        (k.entity_id, k.reason) for k in plan.kept
-    ]
+    actions = [(op.action, op.entity_id) for op in plan.operations]
+    assert ("update", eid("b")) in actions
+    assert actions.index(("update", eid("b"))) < actions.index(("delete", eid("y")))
 
 
 def test_trashed_items_do_not_stop_deleting_a_metabase_collection():
@@ -557,17 +558,14 @@ def test_removing_a_question_a_metabase_only_dashboard_shows_needs_force(force):
 
     plan = build_plan(local, connected(index), force=force)
 
+    change = "removed here, but is used by dashboard 'board', which is not in"
     assert not plan.blocked
-    if force:
-        assert [(op.action, op.entity_id) for op in plan.operations] == [
-            ("archive", eid("q"))
-        ]
-    else:
-        change = "removed here, but is used by dashboard 'board', which is not in"
-        assert plan.empty
-        assert [(c.entity_id, c.change) for c in plan.conflicts] == [
-            (eid("q"), f"{change} the files")
-        ]
+    assert [(c.entity_id, c.change) for c in plan.conflicts] == [
+        (eid("q"), f"{change} the files (--force removes it anyway)")
+    ]
+    assert [(op.action, op.entity_id) for op in plan.operations] == (
+        [("archive", eid("q"))] if force else []
+    )
 
 
 def test_removing_a_question_a_managed_dashboard_shows_is_blocked():
@@ -650,8 +648,7 @@ def test_nothing_is_swept_along_with_a_blocked_removal():
     assert eid("q") in [u.entity_id for u in plan.unmanaged]
 
 
-@pytest.mark.parametrize("force", [False, True])
-def test_an_edit_made_in_metabase_never_blocks_its_collection(force):
+def test_an_edit_made_in_metabase_never_blocks_its_collection():
     index = remote(
         collection=[collection(1, "a"), collection(2, "c", "/1/")],
         card=[card(10, "m", 2)],
@@ -659,15 +656,13 @@ def test_an_edit_made_in_metabase_never_blocks_its_collection(force):
     local = local_from(index, [(COLLECTION, 1)], {eid("a"), eid("c"), eid("m")})
     local.state[eid("m")] = Managed("card", "edited since")
 
-    plan = build_plan(local, connected(index), force=force)
+    plan = build_plan(local, connected(index))
 
-    assert not plan.blocked
-    if force:
-        assert [(op.action, op.entity_id) for op in plan.operations] == [
-            ("archive", eid("c"))
-        ]
-    else:
-        assert {c.entity_id for c in plan.conflicts} == {eid("m"), eid("c")}
+    assert not plan.blocked and not plan.conflicts
+    assert [(op.action, op.entity_id) for op in plan.operations] == [
+        ("archive", eid("c"))
+    ]
+    assert [d.entity_id for d in plan.drift] == [eid("m")]
 
 
 def test_deleting_a_dashboard_takes_its_own_questions_with_it():
@@ -1104,18 +1099,33 @@ def managed_tree(index: Index) -> LocalTree:
     return local
 
 
-def test_an_edit_made_in_metabase_is_reported_not_reverted():
+def test_an_edit_made_in_metabase_is_put_back_and_marked():
     index = remote(collection=[collection(1, "a")], card=[card(10, "c", 1)])
     local = managed_tree(index)
     index.add(CARD, card(10, "c", 1, description="edited in the UI"))
 
     plan = plan_for(index, local)
 
-    assert plan.empty
+    assert [(op.action, op.changes) for op in plan.operations] == [
+        ("update", ["description"])
+    ]
     assert [(d.entity_id, d.change) for d in plan.drift] == [
         (eid("c"), "changed in Metabase")
     ]
-    assert "edited in the UI" in plan.diffs[eid("c")]
+    assert "-description: edited in the UI" in plan.diffs[eid("c")]
+
+
+def test_an_item_archived_in_metabase_is_restored_from_the_files():
+    index = remote(collection=[collection(1, "a")], card=[card(10, "c", 1)])
+    local = managed_tree(index)
+    index.add(CARD, card(10, "c", 1, archived=True))
+
+    plan = plan_for(index, local)
+
+    assert [(op.action, op.entity_id) for op in plan.operations] == [
+        ("restore", eid("c"))
+    ]
+    assert [d.change for d in plan.drift] == ["archived in Metabase"]
 
 
 def test_a_different_creator_is_not_a_change():
@@ -1157,21 +1167,22 @@ def test_an_edit_here_is_applied_and_shown_as_a_diff():
     assert "+description: edited in the files" in plan.diffs[eid("c")]
 
 
-def test_edits_on_both_sides_are_a_conflict_until_forced():
+def test_edits_on_both_sides_take_the_files_version_and_are_marked():
     index = remote(collection=[collection(1, "a")], card=[card(10, "c", 1)])
     local = managed_tree(index)
     edit(local, "c", description="edited in the files")
     index.add(CARD, card(10, "c", 1, description="edited in the UI"))
 
-    held = plan_for(index, local)
-    forced = plan_for(index, local, force=True)
+    plan = plan_for(index, local)
 
-    assert held.empty
-    assert [c.entity_id for c in held.conflicts] == [eid("c")]
-    assert [op.action for op in forced.operations] == ["update"]
+    assert not plan.conflicts
+    assert [(op.action, op.changes) for op in plan.operations] == [
+        ("update", ["description"])
+    ]
+    assert [d.change for d in plan.drift] == ["changed here and in Metabase"]
 
 
-def test_removing_a_file_whose_item_changed_in_metabase_is_a_conflict():
+def test_removing_a_file_whose_item_changed_in_metabase_archives_it_and_marks_it():
     index = remote(collection=[collection(1, "a")], card=[card(10, "c", 1)])
     local = managed_tree(index)
     del local.entities[eid("c")]
@@ -1179,8 +1190,11 @@ def test_removing_a_file_whose_item_changed_in_metabase_is_a_conflict():
 
     plan = plan_for(index, local)
 
-    assert plan.empty
-    assert [c.change for c in plan.conflicts] == ["removed here, changed in Metabase"]
+    assert not plan.conflicts
+    assert [(op.action, op.entity_id) for op in plan.operations] == [
+        ("archive", eid("c"))
+    ]
+    assert [d.change for d in plan.drift] == ["removed here, changed in Metabase"]
 
 
 def model_index() -> Index:
@@ -1225,20 +1239,83 @@ def test_dropping_a_models_columns_from_its_file_is_not_a_conflict():
     ]
 
 
-def test_export_keeps_an_edit_to_a_model_written_without_its_columns(
-    tmp_path, monkeypatch
-):
-    index = model_index()
-    local = written_without_columns(index)
-    edit(local, "c", description="edited in the files")
+CARD_FILE = "collections/main/coll_a/card_c.yaml"
+
+
+def on_disk(tmp_path: Path, monkeypatch, index: Index, local: LocalTree) -> None:
     yamlio.write(tmp_path / CONFIG, {})
     write_tree(tmp_path, render(list(local.entities.values())), local.state, {})
     monkeypatch.setattr(workflow, "connect", lambda *args: connected(index))
 
-    result = workflow.export(offline_client(), tmp_path)
 
-    assert not result.conflicts
-    assert result.kept == ["collections/main/coll_a/card_c.yaml"]
+@pytest.mark.parametrize("edited", [False, True])
+def test_export_marks_only_real_edits_to_a_model_written_without_its_columns(
+    tmp_path, monkeypatch, edited
+):
+    index = model_index()
+    local = written_without_columns(index)
+    if edited:
+        edit(local, "c", description="edited in the files")
+    on_disk(tmp_path, monkeypatch, index, local)
+
+    result = workflow.pull(offline_client(), tmp_path)
+
+    assert result.files.changed == [CARD_FILE]
+    assert bool(result.overwrites) is edited
+
+
+def test_export_marks_a_file_you_removed_that_it_restores(tmp_path, monkeypatch):
+    index = remote(collection=[collection(1, "a")], card=[card(10, "c", 1)])
+    on_disk(tmp_path, monkeypatch, index, managed_tree(index))
+    (tmp_path / CARD_FILE).unlink()
+
+    result = workflow.pull(offline_client(), tmp_path)
+
+    assert result.files.added == [CARD_FILE]
+    assert result.overwrites == {CARD_FILE: "restores a file you deleted"}
+
+
+def test_export_marks_an_unapplied_edit_it_removes_with_its_item(tmp_path, monkeypatch):
+    index = remote(collection=[collection(1, "a")], card=[card(10, "c", 1)])
+    local = managed_tree(index)
+    edit(local, "c", description="edited in the files")
+    on_disk(tmp_path, monkeypatch, index, local)
+    index.forget(CARD, 10)
+
+    result = workflow.pull(offline_client(), tmp_path)
+
+    assert result.files.removed == [CARD_FILE]
+    assert result.overwrites == {CARD_FILE: "deletes your edit"}
+
+
+def test_export_leaves_a_file_not_yet_in_metabase_alone(tmp_path, monkeypatch):
+    index = remote(collection=[collection(1, "a")], card=[card(10, "c", 1)])
+    local = managed_tree(index)
+    del local.state[eid("c")]
+    on_disk(tmp_path, monkeypatch, index, local)
+    index.forget(CARD, 10)
+
+    result = workflow.pull(offline_client(), tmp_path)
+
+    assert result.files.empty and not result.overwrites
+    assert result.new == [CARD_FILE]
+
+
+def test_export_writes_nothing_if_the_files_changed_after_listing(
+    tmp_path, monkeypatch
+):
+    index = remote(collection=[collection(1, "a")], card=[card(10, "c", 1)])
+    on_disk(tmp_path, monkeypatch, index, managed_tree(index))
+    index.add(CARD, card(10, "c", 1, description="edited in the UI"))
+    result = workflow.pull(offline_client(), tmp_path)
+    draft = tmp_path / "collections/main/coll_a/draft.yaml"
+    draft.write_text("name: Draft\n", encoding="utf-8")
+
+    with pytest.raises(StateError):
+        workflow.write(tmp_path, result)
+
+    assert draft.exists()
+    assert "edited in the UI" not in (tmp_path / CARD_FILE).read_text()
 
 
 def test_removing_the_dashcard_a_filter_sits_on_asks_to_remove_the_filter_too():
@@ -1275,14 +1352,16 @@ def test_removing_the_dashcard_a_filter_sits_on_asks_to_remove_the_filter_too():
     assert "'Region'" in raised.value.problems[0]
 
 
-def test_an_item_deleted_in_metabase_is_not_recreated():
+def test_an_item_deleted_in_metabase_is_recreated_from_its_file():
     index = remote(collection=[collection(1, "a")], card=[card(10, "c", 1)])
     local = managed_tree(index)
     index.forget(CARD, 10)
 
     plan = plan_for(index, local)
 
-    assert plan.empty
+    assert [(op.action, op.entity_id) for op in plan.operations] == [
+        ("create", eid("c"))
+    ]
     assert [d.change for d in plan.drift] == ["deleted in Metabase"]
 
 
@@ -1296,7 +1375,10 @@ def test_an_item_moved_out_of_the_managed_collections_is_never_recreated():
     forced = plan_for(index, local, force=True)
 
     assert [(c.entity_id, c.change) for c in held.conflicts] == [
-        (eid("c"), "moved out of the managed collections in Metabase")
+        (
+            eid("c"),
+            "moved out of the managed collections in Metabase (--force skips it)",
+        )
     ]
     assert held.empty and forced.empty
 

@@ -18,14 +18,14 @@ jobs:
       - uses: astral-sh/setup-uv@v5
 
       - name: Install metabase-sync
-        run: uv tool install metabase-sync==0.4.0
+        run: uv tool install metabase-sync==0.4.3
 
       - name: Export live state
         working-directory: metabase
         env:
           METABASE_URL: ${{ secrets.METABASE_URL }}
           METABASE_API_KEY: ${{ secrets.METABASE_API_KEY }}
-        run: metabase-sync export
+        run: metabase-sync export --auto-approve
 
       - name: Open a pull request if anything changed
         uses: peter-evans/create-pull-request@v7
@@ -36,5 +36,6 @@ jobs:
           title: "Changes made in Metabase"
           body: |
             The nightly export found changes made in Metabase that aren't in `main`.
-            Merge to keep them, or undo them in Metabase.
+            Merge to keep them. Otherwise the next apply undoes them.
+            It also undoes any edits in `main` that were never applied, so check the diff.
           delete-branch: true

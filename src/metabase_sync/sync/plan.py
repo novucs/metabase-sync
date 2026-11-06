@@ -5,7 +5,7 @@ from metabase_sync.sync.compare import compare
 from metabase_sync.sync.match import find_imports, renamed
 from metabase_sync.sync.operations import ARCHIVE, POSITIVE, RESTORE, Plan
 from metabase_sync.sync.order import ordered
-from metabase_sync.sync.remove import KEEP, removals
+from metabase_sync.sync.remove import KEEP, Removed, removals
 from metabase_sync.sync.validate import remote_problems, unknown_tables_and_fields
 
 
@@ -26,25 +26,34 @@ def build_plan(
     writing = {op.entity_id for op in compared.operations if op.action in POSITIVE}
     problems = unknown_tables_and_fields(tree, remote, writing)
     if problems:
-        raise ValidationFailed(problems)
+        raise ValidationFailed(
+            problems,
+            hint="Fix them in the files, or run `metabase-sync export` if Metabase "
+            "already has the fix",
+        )
     restores = [op for op in compared.operations if op.action == RESTORE]
-    removed = removals(
-        tree,
-        remote,
-        removal,
-        restores,
-        force,
-        unmanaged,
-        whole_instance=scope is None,
-        writing=writing,
-    )
+
+    def remove(forced: bool) -> Removed:
+        return removals(
+            tree,
+            remote,
+            removal,
+            restores,
+            forced,
+            unmanaged,
+            whole_instance=scope is None,
+            writing=writing,
+        )
+
+    removed = remove(force)
+    unforced = remove(False) if force else removed
     return Plan(
         metabase=remote.index.version,
         force=force,
         operations=ordered([*compared.operations, *removed.operations], tree, remote),
         renames=renames,
-        drift=compared.drift,
-        conflicts=[*compared.conflicts, *removed.conflicts],
+        drift=[*compared.drift, *removed.drift],
+        conflicts=[*compared.conflicts, *unforced.conflicts],
         blocked=removed.blocked,
         diffs=compared.diffs,
         cascaded=removed.cascaded,

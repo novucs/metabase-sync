@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `export` now works like `apply` in reverse. It makes the files match Metabase, lists the files it will change, and asks first. It marks any file where it would overwrite an edit you haven't applied. Use `--auto-approve` in CI. Files that aren't in Metabase are left as they are.
+- `--force` on `plan` and `apply` now only overrides the remaining conflicts. Each conflict says what `--force` does.
+
+### Removed
+
+- `export --force`. Answering yes to the prompt does the same.
+
+### Fixed
+
+- `apply` now makes Metabase match the files, like Terraform. It puts back items edited, archived, or deleted in Metabase, and the files win when both sides changed. `plan` marks each of these. To keep a change made in Metabase, run `export` first. Restoring an older copy of the files, with its state file, now restores the items. After upgrading, run `export` before your first `apply` to keep any changes made in Metabase.
+
 ## [0.4.2] - 2026-11-06
 
 ### Changed

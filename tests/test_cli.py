@@ -39,7 +39,7 @@ def test_ctrl_c_exits_130_and_says_so(tmp_path, monkeypatch, capsys):
     def interrupted(*args: object, **kwargs: object) -> None:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(workflow, "export", interrupted)
+    monkeypatch.setattr(workflow, "pull", interrupted)
 
     code = run(monkeypatch, "export", "--chdir", str(tmp_path))
 
@@ -47,24 +47,38 @@ def test_ctrl_c_exits_130_and_says_so(tmp_path, monkeypatch, capsys):
     assert "Interrupted." in capsys.readouterr().err
 
 
+def exporting(monkeypatch, tmp_path, **fields: object) -> list[object]:
+    yamlio.write(tmp_path / tree.CONFIG, {})
+    monkeypatch.setenv("METABASE_URL", "http://mb.test")
+    monkeypatch.setenv("METABASE_API_KEY", "k")
+    result = workflow.ExportResult(
+        **{
+            "files": tree.Changes([], [], [], []),
+            "overwrites": {},
+            "new": [],
+            "warnings": [],
+            "broken": [],
+            "missing": [],
+            "current": {},
+            "rendered": {},
+            "state": {},
+            "moves": {},
+            **fields,
+        }
+    )
+    writes: list[object] = []
+    monkeypatch.setattr(workflow, "pull", lambda *args, **kwargs: result)
+    monkeypatch.setattr(workflow, "write", lambda *args: writes.append(args))
+    return writes
+
+
 @pytest.mark.parametrize("verbose", [False, True])
 def test_items_with_missing_references_are_summarised_unless_verbose(
     tmp_path, monkeypatch, capsys, verbose
 ):
-    yamlio.write(tmp_path / tree.CONFIG, {})
-    monkeypatch.setenv("METABASE_URL", "http://mb.test")
-    monkeypatch.setenv("METABASE_API_KEY", "k")
     broken = ["card 'A' uses table 1", "card 'B' uses fields 2, 3"]
     missing = ["card 'C' refers to database 9", "card 'D' refers to card 8"]
-    result = workflow.ExportResult(
-        files=tree.Changes([], [], [], []),
-        kept=[],
-        conflicts=[],
-        warnings=[],
-        broken=broken + broken,
-        missing=missing,
-    )
-    monkeypatch.setattr(workflow, "export", lambda *args, **kwargs: result)
+    exporting(monkeypatch, tmp_path, broken=broken + broken, missing=missing)
 
     run(monkeypatch, "export", "--chdir", str(tmp_path), *["-v"] * verbose)
 
@@ -78,18 +92,11 @@ def test_items_with_missing_references_are_summarised_unless_verbose(
 
 
 def test_a_single_item_with_a_missing_table_is_named(tmp_path, monkeypatch, capsys):
-    yamlio.write(tmp_path / tree.CONFIG, {})
-    monkeypatch.setenv("METABASE_URL", "http://mb.test")
-    monkeypatch.setenv("METABASE_API_KEY", "k")
-    result = workflow.ExportResult(
-        files=tree.Changes([], [], [], []),
-        kept=[],
-        conflicts=[],
-        warnings=[],
+    exporting(
+        monkeypatch,
+        tmp_path,
         broken=["card 'A' uses table 1, which no longer exists in the database"],
-        missing=[],
     )
-    monkeypatch.setattr(workflow, "export", lambda *args, **kwargs: result)
 
     run(monkeypatch, "export", "--chdir", str(tmp_path))
 
@@ -97,6 +104,54 @@ def test_a_single_item_with_a_missing_table_is_named(tmp_path, monkeypatch, caps
     assert printed == (
         "warning: card 'A' uses table 1, which no longer exists in the database"
     )
+
+
+@pytest.mark.parametrize(
+    ("flags", "code", "written"),
+    [([], 1, False), (["--check"], 2, False), (["--auto-approve"], 0, True)],
+)
+def test_export_writes_only_once_approved(
+    tmp_path, monkeypatch, capsys, flags, code, written
+):
+    writes = exporting(
+        monkeypatch,
+        tmp_path,
+        files=tree.Changes([], ["collections/main/a.yaml"], [], []),
+        overwrites={"collections/main/a.yaml": "overwrites your edit"},
+    )
+
+    exited = run(monkeypatch, "export", "--chdir", str(tmp_path), *flags)
+
+    printed = capsys.readouterr()
+    assert (exited, bool(writes)) == (code, written)
+    assert "overwrites your edit" in printed.out
+    assert ("no terminal to confirm in" in printed.err) is (code == 1)
+
+
+@pytest.mark.parametrize(("flags", "written"), [([], True), (["--check"], False)])
+def test_export_records_the_sync_even_when_no_file_changes(
+    tmp_path, monkeypatch, flags, written
+):
+    writes = exporting(monkeypatch, tmp_path)
+
+    exited = run(monkeypatch, "export", "--chdir", str(tmp_path), *flags)
+
+    assert (exited, bool(writes)) == (0, written)
+
+
+def test_forcing_a_plan_still_lists_its_conflicts(capsys):
+    moved = Drift(
+        kind="card",
+        entity_id="c" * 21,
+        name="C",
+        change="moved out of the managed collections in Metabase (--force skips it)",
+    )
+
+    cli._print_plan(Plan(metabase="v0.65.3", force=True, conflicts=[moved]))
+
+    printed = capsys.readouterr().out
+    assert "1 conflict, ignored because of --force:" in printed
+    assert "(--force skips it)" in printed
 
 
 def test_items_kept_despite_unmanaged_removal_are_listed_with_reasons(capsys):
