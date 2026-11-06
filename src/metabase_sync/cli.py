@@ -333,18 +333,38 @@ def _print_error(error: MetabaseSyncError) -> None:
         err.print(f"[dim]hint: {escape(error.hint)}[/dim]")
 
 
+def _broken(n: int) -> str:
+    return (
+        f"{count(n, 'item')} {_agree(n, 'uses', 'use')} tables or fields that no "
+        f"longer exist in the database; check {_agree(n, 'it', 'them')} in Metabase."
+    )
+
+
+def _missing(n: int) -> str:
+    return (
+        f"{count(n, 'item')} {_agree(n, 'refers', 'refer')} to things Metabase "
+        f"doesn't list; {_agree(n, 'its file keeps', 'their files keep')} the "
+        "numeric ids."
+    )
+
+
 def _print_warnings(
-    warnings: list[str], broken: Sequence[str] = (), console: Console = err
+    warnings: list[str],
+    broken: Sequence[str] = (),
+    missing: Sequence[str] = (),
+    console: Console = err,
 ) -> None:
-    broken = list(dict.fromkeys(broken))
-    if len(broken) > 1 and not options.verbose:
-        summary = (
-            f"{len(broken)} items refer to tables, fields, or other items that "
-            "Metabase doesn't have; their files keep the numeric ids. Pass --verbose "
-            "to list them."
-        )
-        broken = [summary]
-    for warning in dict.fromkeys([*warnings, *broken]):
+    lines = list(warnings)
+    for found, summary in ((broken, _broken), (missing, _missing)):
+        found = list(dict.fromkeys(found))
+        if not found:
+            continue
+        if options.verbose:
+            lines += [summary(len(found)), *found]
+        else:
+            them = _agree(len(found), "it", "them")
+            lines.append(f"{summary(len(found))} --verbose lists {them}.")
+    for warning in dict.fromkeys(lines):
         console.print(f"[yellow]warning:[/yellow] {escape(warning)}")
 
 
@@ -440,7 +460,7 @@ def export(
     root = _start(root, verbose, debug)
     with _client(root) as client, err.status("Exporting from Metabase"):
         result = workflow.export(client, root, check=check, force=force)
-    _print_warnings(result.warnings, result.broken)
+    _print_warnings(result.warnings, result.broken, result.missing)
     if result.conflicts:
         _print_conflicts(
             result.conflicts, {}, "between your edits and changes made in Metabase:"
@@ -526,6 +546,7 @@ def plan(
     _print_warnings(
         prepared.report.warnings + prepared.remote.index.warnings,
         prepared.remote.index.broken,
+        prepared.remote.index.missing,
     )
     if as_json:
         out.print_json(result.model_dump_json())
@@ -587,6 +608,7 @@ def apply(
         _print_warnings(
             prepared.report.warnings + prepared.remote.index.warnings,
             prepared.remote.index.broken,
+            prepared.remote.index.missing,
         )
         if plan_file is None or result.empty:
             _print_plan(result)
@@ -619,7 +641,9 @@ def status(root: Root = None, verbose: Verbose = False, debug: Debug = False) ->
         )
     for error in result.report.errors:
         out.print(f"[red]error:[/red] {escape(error)}")
-    _print_warnings(result.report.warnings + result.warnings, result.broken, out)
+    _print_warnings(
+        result.report.warnings + result.warnings, result.broken, result.missing, out
+    )
     current = result.plan
     if current is None:
         raise typer.Exit(1)

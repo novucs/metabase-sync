@@ -38,6 +38,8 @@ class Metadata:
     def __init__(self, client: MetabaseClient, databases: dict[str, list[int]]) -> None:
         self._client = client
         self._databases = databases
+        self._known = {db_id for ids in databases.values() for db_id in ids}
+        self.in_scope: set[int] = set()
         self._lock = threading.Lock()
         self._loaded: set[int] = set()
         self._looked_up: set[str] = set()
@@ -47,9 +49,8 @@ class Metadata:
         self._field_id_by_ref: dict[FieldRef, int] = {}
 
     def table_ref(self, table_id: int) -> list[Any]:
-        path = f"/api/table/{table_id}"
-        if table_id not in self._table_by_id and path not in self._looked_up:
-            self._load_for(path, f"table id {table_id}")
+        if table_id not in self._table_by_id:
+            self._find(f"/api/table/{table_id}", f"table id {table_id}")
         if table_id not in self._table_by_id:
             raise UnresolvedReferenceError(f"table id {table_id} not found")
         return list(self._table_by_id[table_id])
@@ -62,9 +63,8 @@ class Metadata:
         return self._table_id_by_ref[key]
 
     def field_ref(self, field_id: int) -> list[Any]:
-        path = f"/api/field/{field_id}"
-        if field_id not in self._field_by_id and path not in self._looked_up:
-            self._load_for(path, f"field id {field_id}")
+        if field_id not in self._field_by_id:
+            self._find(f"/api/field/{field_id}", f"field id {field_id}")
         if field_id not in self._field_by_id:
             raise UnresolvedReferenceError(f"field id {field_id} not found")
         return list(self._field_by_id[field_id])
@@ -89,6 +89,14 @@ class Metadata:
                 hint="Database names must match the Metabase admin database list",
             )
         return found[0]
+
+    def _find(self, path: str, what: str) -> None:
+        scope = self.in_scope & self._known
+        if scope:
+            for db_id in sorted(scope):
+                self._load(db_id)
+        elif path not in self._looked_up:
+            self._load_for(path, what)
 
     def _load_for(self, path: str, what: str) -> None:
         self._looked_up.add(path)

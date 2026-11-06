@@ -47,6 +47,7 @@ class RemoteItem(BaseModel):
     collection_id: int | None = None
     location: str | None = None
     dashboard_id: int | None = None
+    database_id: int | None = None
     document_id: int | None = None
     updated_at: str | None = None
     personal_owner_id: int | None = None
@@ -103,6 +104,7 @@ class Index:
     documents: list[RemoteItem] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     broken: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
     snippets: bool = True
     _by_eid: dict[str, tuple[str, int]] = field(
         default_factory=dict, init=False, repr=False
@@ -303,6 +305,9 @@ def fetch_index(
             index.add(CARD, row)
         elif row.get("entity_id"):
             index.add_outside(CARD, row["id"], row["entity_id"])
+    index.metadata.in_scope = {
+        card.database_id for card in index.all(CARD) if card.database_id is not None
+    }
 
     listed = sorted((row for row in dashboards if in_scope(row)), key=lambda r: r["id"])
     for row in dashboards:

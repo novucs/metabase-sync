@@ -5,7 +5,7 @@ from pydantic import AliasPath, BaseModel, Field
 from metabase_sync.format.representations import COLLECTION, DASHBOARD
 from metabase_sync.format.representations.card import Card, ResultColumn
 from metabase_sync.metabase.index import Index
-from metabase_sync.metabase.references import native, portable
+from metabase_sync.metabase.references import FIELD, native, portable
 
 ENDPOINT = "/api/card"
 LISTING = {"f": "all"}
@@ -122,7 +122,7 @@ def read_column(column: Column, ids: Index) -> ResultColumn:
         effective_type=column.effective_type,
         field_ref=portable(column.field_ref, ids),
         fk_target_field_id=(
-            ids.lenient(ids.metadata.field_ref, column.fk_target_field_id, "field")
+            ids.lenient(ids.metadata.field_ref, column.fk_target_field_id, FIELD)
             if column.fk_target_field_id is not None
             else None
         ),

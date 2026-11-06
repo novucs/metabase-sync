@@ -36,11 +36,11 @@ def portable(value: Any, index: Index) -> Any:
         if type(ref) is not int:
             return ref
         if kind == DATABASE:
-            return index.lenient(index.database_name, ref, "database")
+            return index.lenient(index.database_name, ref, DATABASE)
         if kind == TABLE:
-            return index.lenient(index.metadata.table_ref, ref, "table")
+            return index.lenient(index.metadata.table_ref, ref, TABLE)
         if kind == FIELD:
-            return index.lenient(index.metadata.field_ref, ref, "field")
+            return index.lenient(index.metadata.field_ref, ref, FIELD)
         return index.lenient(lambda r: index.entity_id(kind, r), ref, kind)
 
     return walk(value, resolve)

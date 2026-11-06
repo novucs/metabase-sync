@@ -291,7 +291,7 @@ def test_a_link_to_a_deleted_database_is_kept_with_a_warning():
     assert isinstance(dashboard, Dashboard)
     link = dashboard.dashcards[0].visualization_settings["link"]
     assert link["entity"]["id"] == 2
-    assert found.broken
+    assert found.missing
 
 
 def test_an_unreadable_reference_names_the_item_it_is_in():
@@ -333,8 +333,8 @@ def test_a_card_on_a_database_metabase_does_not_list_reads_with_a_warning():
     card = Remote(index=found, api=v58).read(CARD, raw)
 
     assert isinstance(card, Card) and card.database_id is None
-    assert found.broken == [
-        "card 'Audit' refers to database 13371337, which Metabase doesn't have"
+    assert found.missing == [
+        "card 'Audit' refers to database 13371337, which Metabase doesn't list"
     ]
 
 
@@ -585,6 +585,41 @@ def test_a_missing_field_is_looked_up_in_metabase_only_once():
         "/api/field/7",
         "/api/table/3",
         "/api/database/1/metadata",
+    ]
+
+
+def test_a_field_missing_from_the_databases_in_use_needs_no_lookup():
+    client = DeactivatedField()
+    metadata = Metadata(client, {"Warehouse": [1]})
+    metadata.in_scope = {1}
+
+    for _ in range(2):
+        with pytest.raises(UnresolvedReferenceError):
+            metadata.field_ref(7)
+
+    assert client.requested == ["/api/database/1/metadata"]
+
+
+def test_a_question_using_a_field_gone_from_its_database_says_so_without_lookups():
+    client = DeactivatedField()
+    found = index(client)
+    found.metadata.in_scope = {1}
+    raw = {
+        "id": 5,
+        "entity_id": "Q" * 21,
+        "name": "Model",
+        "type": "model",
+        "display": "table",
+        "database_id": 1,
+        "dataset_query": {"database": 1},
+        "result_metadata": [{"name": "PRODUCT_ID", "fk_target_field_id": 7}],
+    }
+
+    Remote(index=found, api=v58).read(CARD, raw)
+
+    assert "/api/field/7" not in client.requested
+    assert found.broken == [
+        "card 'Model' uses field 7, which no longer exists in the database"
     ]
 
 

@@ -159,6 +159,7 @@ class ExportResult:
     conflicts: list[Drift]
     warnings: list[str]
     broken: list[str]
+    missing: list[str] = field(default_factory=list)
 
     @property
     def clean(self) -> bool:
@@ -264,6 +265,7 @@ def export(
         conflicts=conflicts,
         warnings=list(dict.fromkeys(remote.index.warnings)),
         broken=remote.index.broken,
+        missing=remote.index.missing,
     )
 
 
@@ -427,6 +429,7 @@ class Status:
     plan: Plan | None = None
     warnings: list[str] = field(default_factory=list)
     broken: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
 
 
 def status(client: MetabaseClient, root: Path) -> Status:
@@ -456,4 +459,5 @@ def status(client: MetabaseClient, root: Path) -> Status:
             )
     result.warnings += remote.index.warnings
     result.broken = remote.index.broken
+    result.missing = remote.index.missing
     return result

@@ -54,13 +54,15 @@ def test_items_with_missing_references_are_summarised_unless_verbose(
     yamlio.write(tmp_path / tree.CONFIG, {})
     monkeypatch.setenv("METABASE_URL", "http://mb.test")
     monkeypatch.setenv("METABASE_API_KEY", "k")
-    broken = ["card 'A' refers to 1 table", "card 'B' refers to 2 fields"]
+    broken = ["card 'A' uses table 1", "card 'B' uses fields 2, 3"]
+    missing = ["card 'C' refers to database 9", "card 'D' refers to card 8"]
     result = workflow.ExportResult(
         files=tree.Changes([], [], [], []),
         kept=[],
         conflicts=[],
         warnings=[],
         broken=broken + broken,
+        missing=missing,
     )
     monkeypatch.setattr(workflow, "export", lambda *args, **kwargs: result)
 
@@ -68,8 +70,11 @@ def test_items_with_missing_references_are_summarised_unless_verbose(
 
     printed = capsys.readouterr().err
     assert ("card 'A'" in printed) is verbose
-    assert ("2 items refer to" in printed) is not verbose
-    assert printed.count("warning:") == 2 - (not verbose)
+    assert ("card 'C'" in printed) is verbose
+    assert "2 items use tables or fields that no longer exist" in printed
+    assert "2 items refer to things Metabase doesn't list" in printed
+    assert ("--verbose lists them" in printed) is not verbose
+    assert printed.count("warning:") == (6 if verbose else 2)
 
 
 def test_items_kept_despite_unmanaged_removal_are_listed_with_reasons(capsys):
@@ -105,7 +110,7 @@ def test_plan_exits_1_on_a_blocked_removal_even_with_force(
         name="Finance",
         change="removed here, but holds document 'Q3 notes'",
     )
-    index = SimpleNamespace(warnings=[], broken=[])
+    index = SimpleNamespace(warnings=[], broken=[], missing=[])
     prepared = SimpleNamespace(
         notes=[],
         report=SimpleNamespace(warnings=[]),
