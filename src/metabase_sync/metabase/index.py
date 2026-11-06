@@ -250,6 +250,7 @@ def manageable(collections: list[RemoteItem]) -> dict[int, list[RemoteItem]]:
 def fetch_index(
     client: MetabaseClient, roots: set[str] | None = None, snippets: bool = True
 ) -> Index:
+    client.report("Listing collections, questions, and dashboards")
     listed = client.map(
         lambda listing: rows(client.get(listing[0], **listing[1])), LISTINGS.values()
     )
@@ -309,7 +310,11 @@ def fetch_index(
     for row in dashboards:
         if not in_scope(row) and row.get("entity_id"):
             index.add_outside(DASHBOARD, row["id"], row["entity_id"])
-    details = client.map(lambda row: client.get(f"/api/dashboard/{row['id']}"), listed)
+    details = client.map(
+        lambda row: client.get(f"/api/dashboard/{row['id']}"),
+        listed,
+        label="Reading dashboards",
+    )
     for summary, detail in zip(listed, details, strict=True):
         index.add(DASHBOARD, with_detail(summary, detail))
 
@@ -343,11 +348,14 @@ def add_hidden_subscriptions(
     missing = sorted(e for e in entity_ids if index.find(e) is None)
     if not missing:
         return
+    client.report("Reading subscriptions")
     found = client.post(
         "/api/eid-translation/translate",
         {"entity_ids": {"pulse": missing}},
         read_only=True,
     )
     ids = [t["id"] for t in found["entity_ids"].values() if t.get("status") == "ok"]
-    for row in client.map(lambda i: client.get(f"/api/pulse/{i}"), ids):
+    for row in client.map(
+        lambda i: client.get(f"/api/pulse/{i}"), ids, label="Reading subscriptions"
+    ):
         add_subscription(index, row)

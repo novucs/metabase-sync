@@ -38,7 +38,7 @@ class Metadata:
     def __init__(self, client: MetabaseClient, databases: dict[str, list[int]]) -> None:
         self._client = client
         self._databases = databases
-        self._known = {db_id for ids in databases.values() for db_id in ids}
+        self._names = {db_id: name for name, ids in databases.items() for db_id in ids}
         self._lock = threading.Lock()
         self._loaded: set[int] = set()
         self._looked_up: set[str] = set()
@@ -90,13 +90,14 @@ class Metadata:
         return found[0]
 
     def _find(self, path: str, what: str, database: int | None) -> None:
-        if database in self._known:
+        if database in self._names:
             self._load(database)
             self._looked_up.add(path)
         elif path not in self._looked_up:
             self._load_for(path, what)
 
     def _load_for(self, path: str, what: str) -> None:
+        self._client.report("Looking up tables and fields")
         self._looked_up.add(path)
         located = self._located(path, what)
         if located.db_id is None:
@@ -119,6 +120,12 @@ class Metadata:
         with self._lock:
             if db_id in self._loaded:
                 return
+            name = self._names.get(db_id)
+            self._client.report(
+                f"Loading tables and fields for {name!r}"
+                if name
+                else f"Loading tables and fields for database {db_id}"
+            )
             meta = DatabaseMeta.model_validate(
                 self._client.get(
                     f"/api/database/{db_id}/metadata", include_hidden="true"

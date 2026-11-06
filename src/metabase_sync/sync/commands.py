@@ -80,6 +80,7 @@ def load_config(root: Path) -> Config:
 
 
 def connect(client: MetabaseClient, config: Config, local: LocalTree) -> Remote:
+    client.report("Connecting to Metabase")
     api = for_version(*client.supported_version)
     index = fetch_index(client, config.collections, config.manages_snippets)
     unknown = sorted(
@@ -286,6 +287,7 @@ def prepare(client: MetabaseClient, root: Path, recover: bool) -> Prepared:
         _not_interrupted(root)
     elif Journal(root).entries():
         api = for_version(*client.supported_version)
+        client.report("Recovering the interrupted apply")
         notes = reconcile(client, api, Journal(root), read_tree(root))
     local = read_tree(root)
     report = validate(local, config.collections)
@@ -360,6 +362,7 @@ def apply(
     except UncertainWriteError:
         raise
     except Exception as error:
+        client.report("Checking what was applied before the error")
         reconcile(client, prepared.remote.api, journal, prepared.tree)
         if isinstance(error, MetabaseSyncError):
             raise ApplyStopped(error, len(executor.applied)) from error

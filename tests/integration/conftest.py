@@ -107,7 +107,9 @@ def mb(metabase_url_and_key: tuple[str, str]) -> Iterator[MetabaseAdmin]:
 
 @pytest.fixture
 def reversed_levels(monkeypatch: pytest.MonkeyPatch) -> None:
-    def run_backwards(self: MetabaseClient, fn: Any, items: Any) -> list[Any]:
+    def run_backwards(
+        self: MetabaseClient, fn: Any, items: Any, label: str | None = None
+    ) -> list[Any]:
         items = list(items)
         return [fn(i) for i in reversed(items)][::-1]
 

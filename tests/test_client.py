@@ -88,6 +88,30 @@ def test_a_create_that_cannot_connect_is_not_reported_as_uncertain():
     assert not isinstance(raised.value, UncertainWriteError)
 
 
+def test_parallel_reads_report_progress_and_keep_their_order():
+    settings = Settings.model_validate({"url": "http://mb.test", "api_key": "k"})
+    client = MetabaseClient(settings)
+    reported: list[str] = []
+    others_counted = threading.Event()
+
+    def report(text: str) -> None:
+        reported.append(text)
+        if text == "Reading 2/3":
+            others_counted.set()
+
+    client.report = report
+    first_waited: list[bool] = []
+
+    def read(item: int) -> int:
+        if item == 0:
+            first_waited.append(others_counted.wait(timeout=5))
+        return item * 10
+
+    assert client.map(read, [0, 1, 2], label="Reading") == [0, 10, 20]
+    assert first_waited == [True]
+    assert reported == ["Reading 0/3", "Reading 1/3", "Reading 2/3", "Reading 3/3"]
+
+
 def test_a_delete_whose_retry_finds_nothing_has_succeeded(serve):
     client, seen = serve(drop_first((404, {"message": "Not found."})))
 

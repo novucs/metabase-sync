@@ -1,7 +1,9 @@
 import logging
 import sys
+import threading
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated
@@ -131,6 +133,24 @@ def _start(root: Path | None, verbose: bool, debug: bool) -> Path:
 def _client(root: Path) -> MetabaseClient:
     require(root)
     return MetabaseClient(load_settings(root))
+
+
+@contextmanager
+def _progress(
+    client: MetabaseClient, text: str = "Reading the files"
+) -> Iterator[None]:
+    def fit(text: str) -> Text:
+        line = Text(text)
+        line.truncate(max(err.width - 2, 1), overflow="ellipsis")
+        return line
+
+    previous = client.report
+    with err.status(fit(text)) as status:
+        client.report = lambda text: status.update(fit(text))
+        try:
+            yield
+        finally:
+            client.report = previous
 
 
 def _version(value: bool) -> None:
@@ -454,7 +474,7 @@ def export(
     debug: Debug = False,
 ) -> None:
     root = _start(root, verbose, debug)
-    with _client(root) as client, err.status("Exporting from Metabase"):
+    with _client(root) as client, _progress(client):
         result = workflow.export(client, root, check=check, force=force)
     _print_warnings(result.warnings, broken=result.broken, missing=result.missing)
     if result.conflicts:
@@ -536,7 +556,7 @@ def plan(
     debug: Debug = False,
 ) -> None:
     root = _start(root, verbose, debug)
-    with _client(root) as client, err.status("Planning"):
+    with _client(root) as client, _progress(client):
         prepared, result = workflow.plan(client, root, force)
     _print_notes(prepared.notes)
     _print_warnings(
@@ -589,16 +609,8 @@ def apply(
     debug: Debug = False,
 ) -> None:
     root = _start(root, verbose, debug)
-
-    def done(op: Operation, detail: str) -> None:
-        mark, style = MARK[op.action]
-        line = _title(mark, style, op.action, op.kind, op.name, None)
-        if detail:
-            line.append(f"  {detail}", style="dim")
-        out.print(line)
-
     with _client(root) as client:
-        with err.status("Planning"):
+        with _progress(client):
             prepared, result = workflow.plan_apply(client, root, plan_file, force)
         _print_notes(prepared.notes)
         _print_warnings(
@@ -619,7 +631,27 @@ def apply(
                 "\nApply these changes?", default=False
             ):
                 raise typer.Exit(1)
-        workflow.apply(client, root, prepared, result, done)
+        steps = Counter(op.entity_id for op in result.operations)
+        total = len(steps)
+        lock = threading.Lock()
+        finished = 0
+        screen = err if out.file.isatty() and err.file.isatty() else out
+
+        def done(op: Operation, detail: str) -> None:
+            nonlocal finished
+            mark, style = MARK[op.action]
+            line = _title(mark, style, op.action, op.kind, op.name, None)
+            if detail:
+                line.append(f"  {detail}", style="dim")
+            with lock:
+                steps[op.entity_id] -= 1
+                if not steps[op.entity_id]:
+                    finished += 1
+                    client.report(f"Applying {finished}/{total}")
+            screen.print(line)
+
+        with _progress(client, f"Applying 0/{total}") if total else nullcontext():
+            workflow.apply(client, root, prepared, result, done)
     if not result.empty:
         out.print(f"\n[green]Applied {count(len(_items(result)), 'change')}.[/green]")
 
@@ -629,7 +661,7 @@ def apply(
 )
 def status(root: Root = None, verbose: Verbose = False, debug: Debug = False) -> None:
     root = _start(root, verbose, debug)
-    with _client(root) as client, err.status("Checking"):
+    with _client(root) as client, _progress(client):
         result = workflow.status(client, root)
     if result.interrupted:
         out.print(

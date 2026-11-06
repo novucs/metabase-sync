@@ -33,7 +33,8 @@ class Remote:
                     return None
                 raise
 
-        for (kind, item), found in zip(hits, client.map(detail, hits), strict=True):
+        checked = client.map(detail, hits, label="Checking what Metabase kept")
+        for (kind, item), found in zip(hits, checked, strict=True):
             if found is None:
                 self.index.forget(kind, item.id)
             else:

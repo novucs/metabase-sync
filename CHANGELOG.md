@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Questions and dashboards using tables or fields that no longer exist in the database get their own warning, separate from references to other things Metabase doesn't list.
+- While working, the spinner says what metabase-sync is waiting on, with a count such as `Reading dashboards 23/60` or `Applying 3/12`.
 
 ### Fixed
 

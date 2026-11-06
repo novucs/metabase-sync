@@ -1,4 +1,5 @@
 import logging
+import threading
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from functools import cached_property
@@ -33,6 +34,7 @@ def _reason(error: requests.RequestException) -> object:
 class MetabaseClient:
     def __init__(self, settings: Settings, retries: int = 3) -> None:
         self.settings = settings
+        self.report: Callable[[str], None] = lambda text: None
         self._base = settings.base
         self._http = requests.Session()
         self._http.headers.update({"Accept": "application/json", **settings.headers})
@@ -71,12 +73,30 @@ class MetabaseClient:
     def post(self, path: str, body: dict[str, Any], read_only: bool = False) -> Any:
         return self._send("POST", path, read_only=read_only, json=body)
 
-    def map[T, R](self, fn: Callable[[T], R], items: Iterable[T]) -> list[R]:
+    def map[T, R](
+        self, fn: Callable[[T], R], items: Iterable[T], label: str | None = None
+    ) -> list[R]:
         items = list(items)
+        lock = threading.Lock()
+        done = 0
+
+        def progress() -> None:
+            if label and items:
+                self.report(f"{label} {done}/{len(items)}")
+
+        def run(item: T) -> R:
+            nonlocal done
+            result = fn(item)
+            with lock:
+                done += 1
+                progress()
+            return result
+
+        progress()
         if len(items) <= 1:
-            return [fn(i) for i in items]
+            return [run(i) for i in items]
         with ThreadPoolExecutor(max_workers=self.settings.concurrency) as pool:
-            return list(pool.map(fn, items))
+            return list(pool.map(run, items))
 
     @cached_property
     def supported_version(self) -> tuple[int, str]:
