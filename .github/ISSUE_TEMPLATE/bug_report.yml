@@ -7,16 +7,13 @@ body:
       value: |
         Thanks for taking the time to file a bug.
 
-        Before submitting, please run `metabase-sync diagnose` and paste the
-        output below. That single command captures the tool version, Python
-        version, Metabase version, and your state tree's resource counts —
-        99% of what we'd ask for in triage.
+        Include the output of `metabase-sync --version`, your Metabase
+        version, and the output of `metabase-sync status`.
 
   - type: textarea
-    id: diagnose
+    id: status
     attributes:
-      label: "`metabase-sync diagnose` output"
-      description: "Paste the output here. It's safe — the API key is auto-redacted."
+      label: Versions and `metabase-sync status` output
       render: text
     validations:
       required: true
@@ -25,7 +22,7 @@ body:
     id: command
     attributes:
       label: Command you ran
-      description: "e.g. `metabase-sync apply --only cards`"
+      description: "e.g. `metabase-sync apply --debug`"
       render: shell
     validations:
       required: true
@@ -49,10 +46,10 @@ body:
   - type: textarea
     id: plan_json
     attributes:
-      label: "`state/.plan.json` (optional)"
+      label: "`metabase-sync plan --json` output (optional)"
       description: |
         If the issue is around plan/apply output: paste the relevant slice of
-        `.plan.json`. Strip anything sensitive before posting.
+        the plan. Strip anything sensitive before posting.
       render: json
 
   - type: textarea

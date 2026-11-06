@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A rewrite. Files from 0.3 are not compatible; export into a new directory once.
+
+### Changed
+
+- Files use the metabase/representations format: one YAML file per item, references by entity id, and databases, tables, and fields by name.
+- Commands run in the current directory or in `--chdir DIR`, instead of `--state-dir`.
+- Supports Metabase 0.58 and later, tested on 0.58, 0.64, and 0.65. Use 0.3 for 0.55 to 0.57.
+- Requires Python 3.15.
+- `apply` asks before changing anything, unless given `--auto-approve` or a saved plan.
+- `plan` exits 1 on conflicts; `--detailed-exitcode` exits 2 only for changes.
+
+### Added
+
+- `init`, `status`, `validate`, and `fmt` commands.
+- `metabase-sync.state` records each item at the last sync, so `export` keeps your unapplied edits, `apply` leaves changes made in Metabase alone, and edits on both sides stop as a conflict until `--force`.
+- `plan` shows a diff per item. `plan --out` with `apply PLANFILE`, `plan --json`, and `export --check`.
+- New files need no entity id, and a file for an item already in Metabase is imported instead of duplicated.
+- Removing a file archives the item, or deletes it with `removal: delete`.
+- `collections` in `metabase-sync.yaml` limits the files to chosen collections.
+- An interrupted `apply` finishes on the next run without creating duplicates.
+- `apply` fails, naming the fields, when Metabase doesn't keep a change.
+- `METABASE_TIMEOUT` and `METABASE_CONCURRENCY`.
+
+### Removed
+
+- `index`, `diagnose`, `doctor` (use `status`), `apply --only`, `apply --backup-dir`, and the `STATE_DIR`, `HTTP_TIMEOUT_S`, `HTTP_MAX_RETRIES`, and `HTTP_RETRY_BACKOFF_S` variables.
+
 ## [0.3.1] - 2026-10-27
 
 ### Fixed

@@ -1,34 +1,30 @@
 # Examples
 
-Templates you can copy into your own repo to wire Metabase changes through your normal git workflow.
+GitHub Actions workflows to copy into your own repository.
 
-## GitHub Actions
-
-| File | What it does |
+| File | Does |
 | --- | --- |
-| [`github-actions-plan-on-pr.yml`](github-actions-plan-on-pr.yml) | On every PR that touches your state tree, run `metabase-sync plan` and post the output as a PR comment. |
-| [`github-actions-apply-on-merge.yml`](github-actions-apply-on-merge.yml) | On merge to `main`, run `metabase-sync apply`. Gated by a GitHub environment so approval can be required. |
-| [`github-actions-drift-detection.yml`](github-actions-drift-detection.yml) | Nightly `export` against the live instance — if anyone edited via the UI, opens a PR with the diff. |
+| [`github-actions-plan-on-pr.yml`](github-actions-plan-on-pr.yml) | Comments `metabase-sync plan` on every pull request that touches the files, including when it fails. |
+| [`github-actions-apply-on-merge.yml`](github-actions-apply-on-merge.yml) | Runs `metabase-sync apply --auto-approve` on merge to `main`, behind a GitHub environment so it can require approval, then commits `metabase-sync.state` and new entity ids back to `main`. |
+| [`github-actions-drift-detection.yml`](github-actions-drift-detection.yml) | Exports nightly and opens a pull request if anyone changed Metabase in the UI. |
 
-Both expect:
+They expect:
 
-- The state tree at `infrastructure/metabase/state/` (adjust the `paths:` filter if yours lives elsewhere).
-- `METABASE_URL` and `METABASE_API_KEY` set as GitHub Secrets.
-- A `pypi`-published version of `metabase-sync` (these install with `uv tool install`).
+- The files in `metabase/`. Adjust `paths:` and `working-directory:` if yours live elsewhere.
+- `METABASE_URL` and `METABASE_API_KEY` as repository secrets, and `DRIFT_PR_TOKEN` (a token that can open pull requests) for drift detection.
+- The metabase-sync version pinned in `uv tool install`. Raise it when you upgrade.
 
-## Layout suggestion for the consuming repo
+Commit `metabase-sync.state` after every apply. The apply workflow pushes it to `main` for you; if branch protection blocks that push, run the workflow with a token or bot that is allowed to push.
 
 ```
 your-repo/
-├── infrastructure/
-│   └── metabase/
-│       ├── .env.example        # METABASE_URL=... / METABASE_API_KEY=
-│       ├── .gitignore          # .env, .plan.json, .last-apply.json
-│       └── state/              # ← managed by metabase-sync
-└── .github/
-    └── workflows/
-        ├── metabase-plan.yml   # copy of github-actions-plan-on-pr.yml
-        └── metabase-apply.yml  # copy of github-actions-apply-on-merge.yml
+  metabase/
+    metabase-sync.yaml
+    metabase-sync.state
+    .gitignore
+    collections/
+  .github/
+    workflows/
+      metabase-plan.yml
+      metabase-apply.yml
 ```
-
-Run `metabase-sync` from inside `infrastructure/metabase/`. The `state/` directory is the only thing you commit.

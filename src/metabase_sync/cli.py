@@ -1,355 +1,638 @@
-"""CLI: `metabase-sync export | plan | apply | index`.
-
-The intended workflow is:
-
-    metabase-sync export        # pull current Metabase state into state/
-    edit files...               # author or modify dashboards/cards in your editor
-    metabase-sync plan          # see what would change, per item
-    metabase-sync apply         # execute the same diff
-
-Exit codes follow the terraform convention:
-
-    0 = success and no changes (or apply finished cleanly)
-    1 = error (HTTP failure, validation failure, preflight failure)
-    2 = `plan` detected pending changes (informational; not an error)
-"""
-
-import json
 import logging
-import os
 import sys
+from collections import Counter
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Annotated
 
 import typer
+from rich.console import Console
+from rich.highlighter import NullHighlighter
 from rich.logging import RichHandler
+from rich.markup import escape
+from rich.text import Text
 
 from metabase_sync import __version__
-from metabase_sync.errors import MetabaseSyncError
+from metabase_sync.errors import (
+    ConfigError,
+    ConflictError,
+    MetabaseSyncError,
+    ValidationFailed,
+    count,
+)
+from metabase_sync.metabase.client import MetabaseClient
 from metabase_sync.settings import load_settings
+from metabase_sync.store.journal import Journal
+from metabase_sync.store.tree import CONFIG, WORKDIR, Changes, read_tree, require
+from metabase_sync.sync import commands as workflow
+from metabase_sync.sync.commands import load_config
+from metabase_sync.sync.operations import (
+    ARCHIVE,
+    CREATE,
+    DELETE,
+    IMPORT,
+    LINKS,
+    RESTORE,
+    UPDATE,
+    Drift,
+    Operation,
+    Plan,
+)
+from metabase_sync.sync.validate import validate
+
+ISSUES = "https://github.com/novucs/metabase-sync/issues"
+EXAMPLES = (
+    "Examples:\n\n"
+    "  metabase-sync init\n\n"
+    "  metabase-sync export          pull Metabase into this directory\n\n"
+    "  metabase-sync status          what changed here and in Metabase\n\n"
+    "  metabase-sync plan            show the diff apply would make\n\n"
+    "  metabase-sync apply           apply it, after asking\n\n"
+    "Set METABASE_URL and METABASE_API_KEY first. Docs: "
+    "https://github.com/novucs/metabase-sync"
+)
+
+app = typer.Typer(
+    add_completion=False,
+    pretty_exceptions_enable=False,
+    help="Metabase as code: keep collections, questions, dashboards, snippets, and "
+    "subscriptions in git, in the metabase/representations format.",
+    epilog=EXAMPLES,
+)
+out = Console(highlight=False, soft_wrap=True)
+err = Console(stderr=True, highlight=False, soft_wrap=True)
 
 
-def _configure_logging(verbose: bool) -> None:
-    """Configure the package logger to print to stderr via Rich. Verbose mode
-    drops to DEBUG and surfaces every retry/probe."""
+@dataclass
+class Options:
+    verbose: bool = False
+    debug: bool = False
+    root: Path = Path(".")
+
+
+options = Options()
+
+Root = Annotated[
+    Path | None,
+    typer.Option(
+        "--chdir",
+        help="Run in this directory instead of the current one.",
+        envvar="METABASE_SYNC_CHDIR",
+        show_default=False,
+    ),
+]
+Verbose = Annotated[
+    bool, typer.Option("--verbose", "-v", help="Show every file and HTTP request.")
+]
+Debug = Annotated[bool, typer.Option("--debug", help="Show tracebacks on errors.")]
+Force = Annotated[
+    bool,
+    typer.Option(
+        "--force",
+        help="Overwrite every change made in Metabase since the last sync, "
+        "not only conflicts.",
+    ),
+]
+MARK = {
+    CREATE: ("+", "green"),
+    IMPORT: ("<", "blue"),
+    RESTORE: ("+", "cyan"),
+    UPDATE: ("~", "yellow"),
+    ARCHIVE: ("-", "red"),
+    DELETE: ("-", "bold red"),
+}
+PRECEDENCE = (CREATE, RESTORE, IMPORT, UPDATE, DELETE, ARCHIVE)
+
+
+def _start(root: Path | None, verbose: bool, debug: bool) -> Path:
+    options.verbose |= verbose
+    options.debug |= debug
     handler = RichHandler(
+        console=err,
         show_time=False,
+        show_level=False,
         show_path=False,
-        markup=False,
-        rich_tracebacks=False,
-        log_time_format="",
+        highlighter=NullHighlighter(),
     )
-    handler.setFormatter(logging.Formatter("%(message)s"))
-    pkg_logger = logging.getLogger("metabase_sync")
-    pkg_logger.handlers.clear()
-    pkg_logger.addHandler(handler)
-    pkg_logger.setLevel(logging.DEBUG if verbose else logging.INFO)
-    pkg_logger.propagate = False
+    if options.verbose:
+        handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+        logging.basicConfig(level=logging.INFO, handlers=[handler])
+    else:
+        handler.setFormatter(logging.Formatter("warning: %(message)s"))
+        logger = logging.getLogger("metabase_sync")
+        logger.addHandler(handler)
+        logger.setLevel(logging.WARNING)
+    options.root = root or options.root
+    return options.root
 
 
-app = typer.Typer(add_completion=False, no_args_is_help=True)
+def _client(root: Path) -> MetabaseClient:
+    require(root)
+    return MetabaseClient(load_settings(root))
 
 
-def _version_callback(value: bool) -> None:
+def _version(value: bool) -> None:
     if value:
-        typer.echo(f"metabase-sync {__version__}")
+        out.print(f"metabase-sync {__version__}")
         raise typer.Exit()
 
 
-@app.callback()
-def _main(
-    version: bool = typer.Option(
-        False,
-        "--version",
-        callback=_version_callback,
-        is_eager=True,
-        help="Print version and exit.",
-    ),
-    verbose: bool = typer.Option(
-        False,
-        "--verbose",
-        "-v",
-        help="Show DEBUG-level logs (per-HTTP-request and retry diagnostics).",
-    ),
+@app.callback(invoke_without_command=True)
+def main_options(
+    ctx: typer.Context,
+    root: Root = None,
+    verbose: Verbose = False,
+    debug: Debug = False,
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version", callback=_version, is_eager=True, help="Show the version."
+        ),
+    ] = False,
 ) -> None:
-    """Metabase as code: export, plan, and apply via the Metabase REST API."""
-    _configure_logging(verbose=verbose)
-    _ = version
+    options.verbose, options.debug = verbose, debug
+    options.root = root or Path(".")
+    if ctx.invoked_subcommand is None:
+        out.print(ctx.get_help())
 
 
-def _client_from_settings(s):
-    from metabase_sync.client import MetabaseClient
+def _agree(n: int, one: str, many: str) -> str:
+    return one if n == 1 else many
 
-    return MetabaseClient(
-        s.metabase_url,
-        s.metabase_api_key,
-        timeout_s=s.http_timeout_s,
-        max_retries=s.http_max_retries,
-        retry_backoff_s=s.http_retry_backoff_s,
-        headers=s.metabase_headers,
+
+@dataclass
+class Item:
+    entity_id: str
+    kind: str
+    name: str
+    path: str | None
+    actions: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def action(self) -> str:
+        return next(a for a in PRECEDENCE if a in self.actions)
+
+
+def _items(plan: Plan) -> list[Item]:
+    found: dict[str, Item] = {}
+    for op in plan.operations:
+        item = found.setdefault(
+            op.entity_id,
+            Item(entity_id=op.entity_id, kind=op.kind, name=op.name, path=op.path),
+        )
+        item.actions.append(op.action)
+        if op.part == LINKS:
+            item.notes.append("then links to items this apply creates")
+        elif op.reason:
+            item.notes.append(op.reason)
+    overwritten = plan.drifted if plan.force else set()
+    for item in found.values():
+        if item.entity_id in overwritten:
+            item.notes.append("overwrites a change made in Metabase")
+    return list(found.values())
+
+
+def _title(
+    mark: str, style: str, words: str, kind: str, name: str, path: str | None
+) -> Text:
+    line = Text("  ")
+    line.append(f"{mark} {words}", style=style)
+    line.append(f" {kind} {name!r}")
+    if path:
+        line.append(f"  {path}", style="dim")
+    return line
+
+
+def _entry_line(mark: str, style: str, entry: Drift) -> Text:
+    line = Text("  ")
+    line.append(mark, style=style)
+    line.append(f" {entry.kind} {entry.name!r}")
+    if entry.path:
+        line.append(f"  {entry.path}", style="dim")
+    line.append(f"  {entry.change}", style=style)
+    return line
+
+
+def _print_diff(diff: str) -> None:
+    for raw in diff.splitlines():
+        style = (
+            "dim"
+            if raw.startswith(("---", "+++", "@@"))
+            else "green"
+            if raw.startswith("+")
+            else "red"
+            if raw.startswith("-")
+            else ""
+        )
+        out.print(Text(f"      {raw}", style=style))
+
+
+def _print_unmanaged(plan: Plan) -> None:
+    n = len(plan.unmanaged)
+    out.print(
+        f"[dim]{count(n, 'item')} {_agree(n, 'exists', 'exist')} only in Metabase "
+        f"and {_agree(n, 'is', 'are')} left alone; `metabase-sync export` brings "
+        f"{_agree(n, 'it', 'them')} in.[/dim]"
+    )
+    if options.verbose:
+        for ref in plan.unmanaged:
+            out.print(Text(f"  {ref.kind} {ref.name!r}", style="dim"))
+
+
+def _print_plan(plan: Plan) -> None:
+    items = _items(plan)
+    for item in items:
+        mark, style = MARK[item.action]
+        out.print(_title(mark, style, item.action, item.kind, item.name, item.path))
+        for note in item.notes:
+            out.print(Text(f"      {note}", style="dim"))
+        if item.action in (IMPORT, UPDATE, RESTORE) and item.entity_id in plan.diffs:
+            _print_diff(plan.diffs[item.entity_id])
+    if items:
+        tally = Counter(item.action for item in items)
+        out.print(
+            "\nPlan: "
+            + ", ".join(f"{tally[a]} to {a}" for a in PRECEDENCE if tally[a])
+            + "."
+        )
+        if tally[DELETE]:
+            out.print(
+                f"[bold red]{count(tally[DELETE], 'item')} will be permanently "
+                "deleted.[/bold red]"
+            )
+    elif plan.drift and not plan.force:
+        out.print("Nothing to apply.")
+    elif not plan.conflicts:
+        out.print("[green]No changes.[/green] Metabase matches the files.")
+    if plan.drift and not plan.force:
+        n = len(plan.drift)
+        them = _agree(n, "it", "them")
+        out.print(
+            f"\n{count(n, 'item')} changed in Metabase since the last sync. Apply "
+            f"leaves {them} alone; `metabase-sync export` takes {them}, `--force` "
+            f"overwrites {them}:"
+        )
+        for entry in plan.drift:
+            out.print(_entry_line("~", "cyan", entry))
+            if options.verbose and entry.entity_id in plan.diffs:
+                _print_diff(plan.diffs[entry.entity_id])
+    if plan.conflicts and not plan.force:
+        _print_conflicts(plan.conflicts, plan.diffs)
+    if plan.cascaded:
+        n = len(plan.cascaded)
+        out.print(
+            f"\n{count(n, 'item')} {_agree(n, 'goes', 'go')} with "
+            "the archived collection or dashboard that holds it:"
+        )
+        for ref in plan.cascaded:
+            out.print(Text(f"  - {ref.kind} {ref.name!r}", style="dim"))
+    if plan.unmanaged:
+        _print_unmanaged(plan)
+
+
+def _print_conflicts(
+    conflicts: list[Drift], diffs: dict[str, str], header: str | None = None
+) -> None:
+    n = len(conflicts)
+    out.print(
+        f"\n{count(n, 'conflict')} "
+        + (
+            header
+            or f"with Metabase. Apply stops until you resolve {_agree(n, 'it', 'them')}:"
+        )
+    )
+    for entry in conflicts:
+        out.print(_entry_line("!", "bold red", entry))
+        if entry.entity_id in diffs:
+            _print_diff(diffs[entry.entity_id])
+
+
+def _print_error(error: MetabaseSyncError) -> None:
+    err.print(f"[red]error:[/red] {escape(str(error))}")
+    if error.hint:
+        err.print(f"[dim]hint: {escape(error.hint)}[/dim]")
+
+
+def _print_warnings(
+    warnings: list[str], broken: Sequence[str] = (), console: Console = err
+) -> None:
+    broken = list(dict.fromkeys(broken))
+    if len(broken) > 1 and not options.verbose:
+        summary = (
+            f"{len(broken)} items refer to tables, fields, or other items that "
+            "Metabase doesn't have; their files keep the numeric ids. Pass --verbose "
+            "to list them."
+        )
+        broken = [summary]
+    for warning in dict.fromkeys([*warnings, *broken]):
+        console.print(f"[yellow]warning:[/yellow] {escape(warning)}")
+
+
+def _print_notes(notes: list[str]) -> None:
+    for note in notes:
+        err.print(f"[cyan]note:[/cyan] {escape(note)}")
+
+
+def _file_lists(changes: Changes) -> list[tuple[str, list[str], str]]:
+    return [
+        ("added", changes.added, "green"),
+        ("changed", changes.changed, "yellow"),
+        ("moved", changes.moved, "cyan"),
+        ("removed", changes.removed, "red"),
+    ]
+
+
+def _print_files(changes: Changes) -> None:
+    for label, paths, style in _file_lists(changes):
+        for path in paths:
+            out.print(f"[{style}]{label:8}[/{style}] {escape(path)}")
+
+
+@app.command(help=f"Create {CONFIG} and a .gitignore.")
+def init(root: Root = None, verbose: Verbose = False, debug: Debug = False) -> None:
+    root = _start(root, verbose, debug)
+    root.mkdir(parents=True, exist_ok=True)
+    config = root / CONFIG
+    if config.exists():
+        err.print(f"{config} already exists.", markup=False)
+        return
+    config.write_text("removal: archive\n", encoding="utf-8")
+    gitignore = root / ".gitignore"
+    lines = gitignore.read_text().splitlines() if gitignore.exists() else []
+    lines += [line for line in (f"{WORKDIR}/", ".env") if line not in lines]
+    gitignore.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    err.print(
+        f"Wrote {config}.\n\n"
+        "Next, set METABASE_URL and METABASE_API_KEY, then run `metabase-sync export`.\n"
+        f"To manage only some collections, list their entity ids under `collections:` "
+        f"in {config}. Each collection's file holds its entity_id after an export.",
+        markup=False,
     )
 
 
-def _parse_only(only: Optional[str]) -> Optional[set[str]]:
-    return {x.strip() for x in only.split(",")} if only else None
-
-
-def _is_interactive() -> bool:
-    """True if we should prompt the user. Honour CI=true / non-tty / --yes."""
-    if os.environ.get("CI", "").lower() == "true":
-        return False
-    return sys.stdout.isatty() and sys.stdin.isatty()
-
-
-@app.command()
+@app.command(help="Pull Metabase into the files, keeping edits you haven't applied.")
 def export(
-    state_dir: Optional[Path] = typer.Option(None, "--state-dir", "-s"),
+    root: Root = None,
+    check: Annotated[
+        bool,
+        typer.Option(
+            "--check", help="Write nothing; exit 2 if the files are out of date."
+        ),
+    ] = False,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force", help="Take Metabase's version even over unapplied edits."
+        ),
+    ] = False,
+    verbose: Verbose = False,
+    debug: Debug = False,
 ) -> None:
-    """Pull everything from Metabase into the on-disk state tree."""
-    from metabase_sync.export import run_export
+    root = _start(root, verbose, debug)
+    with _client(root) as client, err.status("Exporting from Metabase"):
+        result = workflow.export(client, root, check=check, force=force)
+    _print_warnings(result.warnings, result.broken)
+    if result.conflicts:
+        _print_conflicts(
+            result.conflicts, {}, "between your edits and changes made in Metabase:"
+        )
+        err.print(
+            "\n[red]error:[/red] nothing written.\n"
+            "[dim]hint: apply or commit your edits, then run `metabase-sync export --force` "
+            "to take Metabase's versions[/dim]"
+        )
+        raise typer.Exit(1)
+    if result.kept:
+        out.print(
+            f"Kept {count(len(result.kept), 'unapplied edit')} (`metabase-sync apply` pushes them):"
+        )
+        for path in result.kept:
+            out.print(f"  {path}", markup=False)
+    files = result.files
+    if files.empty:
+        out.print("[green]Files are up to date.[/green]")
+        return
+    if options.verbose:
+        _print_files(files)
+    lists = _file_lists(files)
+    total = count(sum(len(paths) for _, paths, _ in lists), "file")
+    summary = ", ".join(f"{len(paths)} {label}" for label, paths, _ in lists if paths)
+    hint = "" if options.verbose else " Pass --verbose to list them."
+    if check:
+        out.print(f"{total} out of date ({summary}).{hint}")
+        raise typer.Exit(2)
+    out.print(f"Updated {total} ({summary}).{hint}")
 
-    s = load_settings(state_dir=state_dir)
-    with _client_from_settings(s) as client:
-        run_export(client, s.state_dir)
+
+@app.command(name="validate", help="Check the files offline.")
+def validate_command(
+    root: Root = None, verbose: Verbose = False, debug: Debug = False
+) -> None:
+    root = _start(root, verbose, debug)
+    require(root)
+    report = validate(read_tree(root), load_config(root).collections)
+    _print_warnings(report.warnings)
+    if report.errors:
+        raise ValidationFailed(report.errors)
+    out.print("[green]Files are valid.[/green]")
 
 
-@app.command()
+@app.command(help="Give files entity ids and rewrite them in canonical form and place.")
+def fmt(root: Root = None, verbose: Verbose = False, debug: Debug = False) -> None:
+    root = _start(root, verbose, debug)
+    assigned, changes = workflow.fmt(root)
+    for path in assigned:
+        out.print(f"[green]{'new ids':8}[/green] {escape(path)}")
+    _print_files(changes)
+    if not assigned and changes.empty:
+        out.print("[green]Already formatted.[/green]")
+
+
+@app.command(help="Show what apply would change, as a diff against Metabase.")
 def plan(
-    state_dir: Optional[Path] = typer.Option(None, "--state-dir", "-s"),
-    only: Optional[str] = typer.Option(
-        None,
-        "--only",
-        help="Comma-separated subset of: collections,snippets,cards,dashboards,pulses",
-    ),
+    root: Root = None,
+    out_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--out", help="Save the plan for `apply PLANFILE`.", dir_okay=False
+        ),
+    ] = None,
+    detailed_exitcode: Annotated[
+        bool,
+        typer.Option(
+            "--detailed-exitcode", help="Exit 2 when there are changes to apply."
+        ),
+    ] = False,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Print the plan as JSON.")
+    ] = False,
+    force: Force = False,
+    verbose: Verbose = False,
+    debug: Debug = False,
 ) -> None:
-    """Compute the diff between state/ and the live instance. Does not write.
-
-    Exits 0 if there is nothing to do, 2 if changes are pending (so CI can fan
-    out from a 2-exit), 1 on error.
-    """
-    from metabase_sync.apply import run
-    from metabase_sync.plan import render_report
-
-    s = load_settings(state_dir=state_dir)
-    with _client_from_settings(s) as client:
-        p = run(client, s.state_dir, mode="plan", only=_parse_only(only))
-
-    typer.echo(render_report(p, s.state_dir))
-    plan_path = s.state_dir / ".plan.json"
-    plan_path.parent.mkdir(parents=True, exist_ok=True)
-    plan_path.write_text(
-        json.dumps(p.to_dict(), indent=2, default=str), encoding="utf-8"
+    root = _start(root, verbose, debug)
+    with _client(root) as client, err.status("Planning"):
+        prepared, result = workflow.plan(client, root, force)
+    _print_notes(prepared.notes)
+    _print_warnings(
+        prepared.report.warnings + prepared.remote.index.warnings,
+        prepared.remote.index.broken,
     )
-    if p.total_writes() > 0:
-        typer.echo(f"\nplan written to {plan_path}")
-        raise typer.Exit(code=2)
-
-
-@app.command()
-def apply(
-    state_dir: Optional[Path] = typer.Option(None, "--state-dir", "-s"),
-    delete: bool = typer.Option(
-        False,
-        "--delete",
-        help="Archive remote items absent from state/. NOT YET IMPLEMENTED — passing this flag is rejected.",
-    ),
-    only: Optional[str] = typer.Option(
-        None,
-        "--only",
-        help="Comma-separated subset of: collections,snippets,cards,dashboards,pulses",
-    ),
-    yes: bool = typer.Option(
-        False,
-        "--yes",
-        "-y",
-        help="Skip the confirmation prompt. Implied when CI=true or stdout is not a TTY.",
-    ),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        help="Skip the optimistic-concurrency check (write even if remote items changed since plan).",
-    ),
-    allow_missing_recipients: bool = typer.Option(
-        False,
-        "--allow-missing-recipients",
-        help="Silently drop pulse recipients whose email doesn't exist on the target. Default: error.",
-    ),
-    backup_dir: Optional[Path] = typer.Option(
-        None,
-        "--backup-dir",
-        help="Run a fresh export to this path before applying. "
-        "If apply trashes something, restore via `--state-dir <backup>`.",
-    ),
-) -> None:
-    """Push the state tree to Metabase. Re-derives the diff at execution time."""
-    if delete:
-        # Reject before any HTTP call so a partial apply can't precede the NotImplementedError.
-        raise typer.BadParameter(
-            "--delete is not yet implemented. "
-            "Run without --delete and archive orphans manually for now.",
-            param_hint="--delete",
-        )
-
-    from metabase_sync.apply import run
-    from metabase_sync.plan import render_report
-
-    s = load_settings(state_dir=state_dir)
-    only_set = _parse_only(only)
-
-    with _client_from_settings(s) as client:
-        # Plan first so the user sees what will happen.
-        preview = run(client, s.state_dir, mode="plan", only=only_set)
-        typer.echo(render_report(preview, s.state_dir))
-
-        if preview.total_writes() == 0:
-            raise typer.Exit(code=0)
-
-        if backup_dir is not None:
-            from metabase_sync.export import run_export
-
-            typer.echo(f"\nbacking up current remote to {backup_dir}…")
-            run_export(client, backup_dir)
-            typer.echo(f"backup complete: {backup_dir}")
-
-        if not yes and _is_interactive():
-            confirmed = typer.confirm("\nApply these changes?", default=False)
-            if not confirmed:
-                typer.echo("aborted.")
-                raise typer.Exit(code=1)
-
-        executed = run(
-            client,
-            s.state_dir,
-            mode="apply",
-            only=only_set,
-            force=force,
-            allow_missing_recipients=allow_missing_recipients,
-            concurrency_snapshot=preview.concurrency_snapshot,
-        )
-
-    # Write audit log so post-mortems aren't reliant on terminal scrollback.
-    last_apply_path = s.state_dir / ".last-apply.json"
-    last_apply_path.parent.mkdir(parents=True, exist_ok=True)
-    last_apply_path.write_text(
-        json.dumps(executed.to_dict(), indent=2, default=str), encoding="utf-8"
-    )
-    typer.echo(f"\napplied. audit log: {last_apply_path}")
-
-
-@app.command()
-def index(
-    state_dir: Optional[Path] = typer.Option(None, "--state-dir", "-s"),
-) -> None:
-    """Debug: print remote resource counts indexed by entity_id."""
-    from metabase_sync.diff import build_remote_index
-
-    s = load_settings(state_dir=state_dir)
-    with _client_from_settings(s) as client:
-        idx = build_remote_index(client)
-    typer.echo(json.dumps(idx.summary(), indent=2))
-
-
-@app.command()
-def init(
-    target: Path = typer.Argument(
-        Path("."),
-        help="Directory to scaffold. Defaults to the current directory.",
-    ),
-    metabase_url: Optional[str] = typer.Option(
-        None, "--url", help="Pre-fill METABASE_URL in the .env."
-    ),
-) -> None:
-    """Scaffold a new state directory: .env, .gitignore, README.
-
-    Run this once at the top of a repo where you want to manage Metabase as code.
-    """
-    target.mkdir(parents=True, exist_ok=True)
-
-    env_example = target / ".env.example"
-    env = target / ".env"
-    gitignore = target / ".gitignore"
-    readme = target / "README.md"
-
-    url_line = metabase_url or "https://metabase.example.com"
-    env_template = f"METABASE_URL={url_line}\nMETABASE_API_KEY=\n"
-    if not env_example.exists():
-        env_example.write_text(env_template)
-    if not env.exists():
-        env.write_text(env_template)
-    if not gitignore.exists():
-        gitignore.write_text(".env\nstate/.plan.json\nstate/.last-apply.json\n")
-    if not readme.exists():
-        readme.write_text(
-            "# Metabase state\n\n"
-            "Managed by [metabase-sync](https://github.com/novucs/metabase-sync).\n\n"
-            "## Quick start\n\n"
-            "1. Mint an admin API key in your Metabase: Settings → Admin → "
-            "Authentication → API keys.\n"
-            "2. Paste it into `.env` as `METABASE_API_KEY=...`.\n"
-            "3. `metabase-sync export`  # pulls the current state into `state/`.\n"
-            "4. Commit `state/` to git.\n\n"
-            "Day-to-day: edit files, `metabase-sync plan`, `metabase-sync apply`.\n"
-        )
-
-    typer.echo(f"scaffolded {target.resolve()}")
-    typer.echo("  next steps:")
-    typer.echo("  1. fill in METABASE_API_KEY in .env (mint from Metabase admin UI)")
-    typer.echo("  2. metabase-sync export")
-
-
-@app.command()
-def diagnose(
-    state_dir: Optional[Path] = typer.Option(None, "--state-dir", "-s"),
-) -> None:
-    """Print everything we'd ask for in a bug report. Paste into the issue."""
-    import platform
-
-    s = load_settings(state_dir=state_dir)
-    typer.echo(f"metabase-sync version: {__version__}")
-    typer.echo(f"python: {platform.python_version()} ({platform.system()})")
-    typer.echo(f"METABASE_URL: {s.metabase_url}")
-    typer.echo(f"METABASE_API_KEY: <redacted> (length {len(s.metabase_api_key)})")
-    typer.echo(f"STATE_DIR: {s.state_dir}")
-    typer.echo(f"HTTP_TIMEOUT_S: {s.http_timeout_s}")
-
-    # State tree counts
-    if s.state_dir.exists():
-        counts = {
-            "collections": len(list(s.state_dir.rglob("_collection.yaml"))),
-            "snippets": len(list((s.state_dir / "snippets").glob("*.sql")))
-            + len(list((s.state_dir / "collections").rglob("snippets/*.sql"))),
-            "cards (sql)": len(
-                list((s.state_dir / "collections").rglob("cards/*.sql"))
-            ),
-            "cards (yaml)": len(
-                list((s.state_dir / "collections").rglob("cards/*.yaml"))
-            ),
-            "dashboards": len(list(s.state_dir.rglob("dashboard.yaml"))),
-            "pulses": len(list((s.state_dir / "pulses").glob("*.yaml"))),
-        }
-        typer.echo("state tree:")
-        for k, v in counts.items():
-            typer.echo(f"  {k}: {v}")
+    if as_json:
+        out.print_json(result.model_dump_json())
     else:
-        typer.echo(f"state tree: <{s.state_dir} does not exist>")
+        _print_plan(result)
+    if out_file is not None:
+        try:
+            out_file.write_text(
+                result.model_dump_json(indent=2) + "\n", encoding="utf-8"
+            )
+        except OSError as e:
+            raise ConfigError(
+                f"Can't write the plan to {out_file}: {e.strerror}"
+            ) from e
+        err.print(
+            f"Saved to {out_file}; run `metabase-sync apply {out_file}`.", markup=False
+        )
+    if result.conflicts and not force:
+        _print_error(ConflictError(result.conflicts, len(result.drift)))
+        raise typer.Exit(1)
+    if detailed_exitcode and result.operations:
+        raise typer.Exit(2)
 
-    # Live instance info
-    try:
-        with _client_from_settings(s) as client:
-            props = client.get("/api/session/properties")
-            tag = (props.get("version") or {}).get("tag") or "<unknown>"
-            typer.echo(f"Metabase version: {tag}")
-            health = client.get("/api/health")
-            typer.echo(f"Metabase /api/health: {health}")
-    except Exception as e:  # noqa: BLE001
-        typer.echo(f"Could not reach instance: {type(e).__name__}: {e}")
+
+@app.command(help="Apply the plan to Metabase, after asking.")
+def apply(
+    plan_file: Annotated[
+        Path | None,
+        typer.Argument(
+            help="A plan saved with `plan --out`; applied without asking.",
+            exists=True,
+            dir_okay=False,
+        ),
+    ] = None,
+    root: Root = None,
+    auto_approve: Annotated[
+        bool, typer.Option("--auto-approve", "-y", help="Apply without asking.")
+    ] = False,
+    force: Force = False,
+    verbose: Verbose = False,
+    debug: Debug = False,
+) -> None:
+    root = _start(root, verbose, debug)
+
+    def done(op: Operation, detail: str) -> None:
+        mark, style = MARK[op.action]
+        line = _title(mark, style, op.action, op.kind, op.name, None)
+        if detail:
+            line.append(f"  {detail}", style="dim")
+        out.print(line)
+
+    with _client(root) as client:
+        with err.status("Planning"):
+            prepared, result = workflow.plan_apply(client, root, plan_file, force)
+        _print_notes(prepared.notes)
+        _print_warnings(
+            prepared.report.warnings + prepared.remote.index.warnings,
+            prepared.remote.index.broken,
+        )
+        if plan_file is None or result.empty:
+            _print_plan(result)
+        if plan_file is None and not result.empty:
+            if not auto_approve and not sys.stdin.isatty():
+                err.print(
+                    "\nNot applying: no terminal to confirm in. "
+                    "Pass --auto-approve, or apply a plan saved with `plan --out`."
+                )
+                raise typer.Exit(1)
+            if not auto_approve and not typer.confirm(
+                "\nApply these changes?", default=False
+            ):
+                raise typer.Exit(1)
+        workflow.apply(client, root, prepared, result, done)
+    if not result.empty:
+        out.print(f"\n[green]Applied {count(len(_items(result)), 'change')}.[/green]")
+
+
+@app.command(
+    help="Show interrupted runs, local and Metabase changes, conflicts, and other problems."
+)
+def status(root: Root = None, verbose: Verbose = False, debug: Debug = False) -> None:
+    root = _start(root, verbose, debug)
+    with _client(root) as client, err.status("Checking"):
+        result = workflow.status(client, root)
+    if result.interrupted:
+        out.print(
+            "[red]An apply was interrupted.[/red] Run `metabase-sync apply` to finish it."
+        )
+    for error in result.report.errors:
+        out.print(f"[red]error:[/red] {escape(error)}")
+    _print_warnings(result.report.warnings + result.warnings, result.broken, out)
+    current = result.plan
+    if current is None:
+        raise typer.Exit(1)
+    items = _items(current)
+    if items:
+        out.print(
+            f"{count(len(items), 'change')} to apply (`metabase-sync plan` shows the diff):"
+        )
+        for item in items:
+            mark, style = MARK[item.action]
+            out.print(_title(mark, style, item.action, item.kind, item.name, item.path))
+    if current.drift:
+        n = len(current.drift)
+        out.print(
+            f"{count(n, 'item')} changed in Metabase (`metabase-sync export` takes "
+            f"{_agree(n, 'it', 'them')}):"
+        )
+        for entry in current.drift:
+            out.print(_entry_line("~", "cyan", entry))
+    if current.conflicts:
+        _print_conflicts(current.conflicts, {})
+    if not (items or current.drift or current.conflicts or result.report.errors):
+        out.print("[green]Files match Metabase.[/green]")
+    if current.unmanaged:
+        _print_unmanaged(current)
+    if result.report.errors or current.conflicts:
+        raise typer.Exit(1)
 
 
 def main() -> None:
-    """Script entry point. Wraps `app()` so any `MetabaseSyncError` becomes a
-    clean `exit 1` message instead of a Python traceback."""
     try:
-        app()
-    except MetabaseSyncError as exc:
-        typer.secho(f"{exc}", err=True)
-        raise typer.Exit(code=1) from None
+        code = app(standalone_mode=False)
+    except typer.Abort:
+        code = 130
+    except Exception as error:
+        if options.debug:
+            raise
+        match error:
+            case typer.TyperException():
+                err.print(f"[red]error:[/red] {escape(error.format_message())}")
+                err.print("[dim]hint: run `metabase-sync --help` for usage[/dim]")
+            case ConflictError():
+                _print_conflicts(error.conflicts, {})
+                err.print()
+                _print_error(error)
+            case ValidationFailed():
+                for problem in error.problems:
+                    err.print(f"[red]error:[/red] {escape(problem)}")
+            case MetabaseSyncError():
+                _print_error(error)
+            case _:
+                err.print(
+                    f"[red]error:[/red] unexpected {type(error).__name__}: "
+                    + escape(str(error))
+                )
+                err.print(
+                    f"[dim]hint: run again with --debug for the traceback, and report it at {ISSUES}[/dim]"
+                )
+        sys.exit(1)
+    if code == 130:
+        unfinished = bool(Journal(options.root).entries())
+        err.print(
+            "\nInterrupted."
+            + (" Run `metabase-sync apply` to finish." if unfinished else "")
+        )
+    sys.exit(code)

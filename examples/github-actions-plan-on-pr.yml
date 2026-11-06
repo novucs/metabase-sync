@@ -3,8 +3,7 @@ name: Metabase plan
 on:
   pull_request:
     paths:
-      - "infrastructure/metabase/state/**"
-      - "infrastructure/metabase/.env.example"
+      - "metabase/**"
 
 permissions:
   contents: read
@@ -19,25 +18,29 @@ jobs:
       - uses: astral-sh/setup-uv@v5
 
       - name: Install metabase-sync
-        run: uv tool install metabase-sync
+        run: uv tool install metabase-sync==0.4.0
 
       - name: Plan
         id: plan
-        working-directory: infrastructure/metabase
+        working-directory: metabase
         env:
           METABASE_URL: ${{ secrets.METABASE_URL }}
           METABASE_API_KEY: ${{ secrets.METABASE_API_KEY }}
         run: |
           set -o pipefail
-          metabase-sync plan | tee /tmp/plan.txt
+          metabase-sync plan 2>&1 | tee /tmp/plan.txt
 
       - name: Comment on PR
+        if: always()
         uses: actions/github-script@v7
+        env:
+          OUTCOME: ${{ steps.plan.outcome }}
         with:
           script: |
             const fs = require('fs');
-            const plan = fs.readFileSync('/tmp/plan.txt', 'utf8');
-            const body = ['### Metabase plan', '', '```', plan.trim(), '```'].join('\n');
+            const plan = fs.existsSync('/tmp/plan.txt') ? fs.readFileSync('/tmp/plan.txt', 'utf8') : '';
+            const title = process.env.OUTCOME === 'success' ? '### Metabase plan' : '### Metabase plan (failed)';
+            const body = [title, '', '```', plan.trim(), '```'].join('\n');
             const { data: comments } = await github.rest.issues.listComments({
               issue_number: context.issue.number,
               owner: context.repo.owner,

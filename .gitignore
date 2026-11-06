@@ -24,8 +24,7 @@ htmlcov/
 # Local state / secrets
 .env
 .env.local
-state/.plan.json
-state/.last-apply.json
+state/
 
 # Editors
 .vscode/
