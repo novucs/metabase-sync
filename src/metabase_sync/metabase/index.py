@@ -231,6 +231,16 @@ LISTINGS: dict[str, tuple[str, dict[str, str]]] = {
 }
 
 
+def manageable(collections: list[RemoteItem]) -> dict[int, list[RemoteItem]]:
+    by_id = {c.id: c for c in collections}
+    chains: dict[int, list[RemoteItem]] = {}
+    for c in collections:
+        chain = [by_id[a] for a in location_ids(c.location) if a in by_id] + [c]
+        if all(link.regular_collection for link in chain):
+            chains[c.id] = chain
+    return chains
+
+
 def fetch_index(
     client: MetabaseClient, roots: set[str] | None = None, snippets: bool = True
 ) -> Index:
@@ -259,7 +269,7 @@ def fetch_index(
     summaries_of = [
         RemoteItem.model_validate(row, extra="ignore") for row in collections
     ]
-    excluded = {c.id for c in summaries_of if not c.regular_collection}
+    chains = manageable(summaries_of)
     root_ids = (
         {c.id for c in summaries_of if c.entity_id in roots}
         if roots is not None
@@ -267,13 +277,9 @@ def fetch_index(
     )
     scoped: set[int] = set()
     for collection, row in zip(summaries_of, collections, strict=True):
-        ancestry = location_ids(collection.location)
-        if collection.id in excluded or any(a in excluded for a in ancestry):
-            excluded.add(collection.id)
-        elif (
-            root_ids is None
-            or collection.id in root_ids
-            or any(a in root_ids for a in ancestry)
+        chain = chains.get(collection.id)
+        if chain is not None and (
+            root_ids is None or any(link.id in root_ids for link in chain)
         ):
             scoped.add(collection.id)
             index.add(COLLECTION, row)

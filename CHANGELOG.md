@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `init --collection NAME` looks up collections by name or entity id and writes them under `collections:`.
+
 ### Changed
 
 - With `collections` set, snippets are no longer managed; set `snippets: true` in `metabase-sync.yaml` to keep them.
@@ -14,15 +18,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.0] - 2026-11-06
 
 A rewrite. Files from 0.3 are not compatible; export into a new directory once.
-
-### Changed
-
-- Files use the metabase/representations format: one YAML file per item, references by entity id, and databases, tables, and fields by name.
-- Commands run in the current directory or in `--chdir DIR`, instead of `--state-dir`.
-- Supports Metabase 0.58 and later, tested on 0.58, 0.64, and 0.65. Use 0.3 for 0.55 to 0.57.
-- Requires Python 3.15.
-- `apply` asks before changing anything, unless given `--auto-approve` or a saved plan.
-- `plan` exits 1 on conflicts; `--detailed-exitcode` exits 2 only for changes.
 
 ### Added
 
@@ -35,6 +30,15 @@ A rewrite. Files from 0.3 are not compatible; export into a new directory once.
 - An interrupted `apply` finishes on the next run without creating duplicates.
 - `apply` fails, naming the fields, when Metabase doesn't keep a change.
 - `METABASE_TIMEOUT` and `METABASE_CONCURRENCY`.
+
+### Changed
+
+- Files use the metabase/representations format: one YAML file per item, references by entity id, and databases, tables, and fields by name.
+- Commands run in the current directory or in `--chdir DIR`, instead of `--state-dir`.
+- Supports Metabase 0.58 and later, tested on 0.58, 0.64, and 0.65. Use 0.3 for 0.55 to 0.57.
+- Requires Python 3.15.
+- `apply` asks before changing anything, unless given `--auto-approve` or a saved plan.
+- `plan` exits 1 on conflicts; `--detailed-exitcode` exits 2 only for changes.
 
 ### Removed
 

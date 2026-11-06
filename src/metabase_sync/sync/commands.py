@@ -23,9 +23,12 @@ from metabase_sync.format.representations import DASHBOARD, KINDS, SUBSCRIPTION
 from metabase_sync.ids import EntityId, new_entity_id
 from metabase_sync.metabase.client import MetabaseClient, UncertainWriteError
 from metabase_sync.metabase.index import (
+    LISTINGS,
     RemoteItem,
     add_hidden_subscriptions,
     fetch_index,
+    manageable,
+    rows,
 )
 from metabase_sync.metabase.remote import Remote
 from metabase_sync.store import tree, yamlio
@@ -86,11 +89,48 @@ def connect(client: MetabaseClient, config: Config, local: LocalTree) -> Remote:
         raise ConfigError(
             f"{CONFIG} lists collections that aren't in Metabase, or are personal: "
             + ", ".join(unknown),
-            hint="Run `metabase-sync export` without `collections:` and copy the "
-            "entity_id from the collection's file",
+            hint="Run `metabase-sync init --collection NAME` to look up a "
+            "collection's entity id",
         )
     add_hidden_subscriptions(client, index, local.ids_of(SUBSCRIPTION))
     return Remote(index=index, api=api)
+
+
+def find_collections(
+    client: MetabaseClient, wanted: list[str]
+) -> list[tuple[str, str]]:
+    path, query = LISTINGS["collections"]
+    listed = [
+        RemoteItem.model_validate(row, extra="ignore")
+        for row in rows(client.get(path, **query))
+    ]
+    candidates = [
+        (chain[-1].entity_id, chain[-1].name.strip().casefold(), chain)
+        for chain in manageable(listed).values()
+        if chain[-1].entity_id
+    ]
+    found: dict[str, str] = {}
+    for name in wanted:
+        matches = {
+            eid: " / ".join(link.name for link in chain)
+            for eid, folded, chain in candidates
+            if eid == name or folded == name.strip().casefold()
+        }
+        if not matches and any(c.entity_id == name for c in listed):
+            raise ConfigError(
+                f"Collection {name} is a personal or system collection, which "
+                "metabase-sync doesn't manage"
+            )
+        if not matches:
+            raise ConfigError(f"No collection has the name or entity id {name!r}")
+        if len(matches) > 1:
+            listing = "\n".join(f"  {where}  {eid}" for eid, where in matches.items())
+            raise ConfigError(
+                f"{len(matches)} collections are named {name!r}:\n{listing}",
+                hint="Pass the entity id of the one you want to --collection",
+            )
+        found |= matches
+    return list(found.items())
 
 
 def remote_entities(remote: Remote) -> list[Entity]:

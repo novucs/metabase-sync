@@ -57,7 +57,7 @@ metabase-sync apply
 
 | Command        | Does                                                                                                                                                                               |
 |----------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `init`         | Create `metabase-sync.yaml` and a `.gitignore`.                                                                                                                                    |
+| `init`         | Create `metabase-sync.yaml` and a `.gitignore`. `--collection NAME` manages only that collection, looked up by name or entity id; repeat it for more.                              |
 | `export`       | Pull Metabase into the files, keeping edits you haven't applied. `--check` writes nothing and exits 2 if the files are out of date. `--force` takes Metabase's version everywhere. |
 | `status`       | Show interrupted runs, changes to apply, changes made in Metabase, conflicts, and problems.                                                                                        |
 | `plan`         | Show what `apply` would change, as a diff. `--out FILE` saves the plan, `--json` prints it as JSON, `--detailed-exitcode` exits 2 when there are changes to apply.                 |
@@ -97,7 +97,7 @@ snippets: false
 removal: archive
 ```
 
-- `collections` limits the files to those collections and everything inside them. Leave it out to manage the whole instance. To find a collection's entity id, run `metabase-sync export` without `collections` and read `entity_id` in the collection's file.
+- `collections` limits the files to those collections and everything inside them. Leave it out to manage the whole instance. `metabase-sync init --collection NAME` looks up a collection's entity id, and prints the line to add when the file already exists.
 - `snippets` decides whether the files hold the instance's snippets. It defaults to `true` without `collections` and `false` with it, so repos that each manage their own collections leave the shared snippets alone. Questions can use snippets either way.
 - `removal` is `archive` (the default) or `delete`. It decides what `apply` does with an item whose file you removed.
 

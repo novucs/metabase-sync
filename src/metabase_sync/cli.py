@@ -351,23 +351,52 @@ def _print_files(changes: Changes) -> None:
 
 
 @app.command(help=f"Create {CONFIG} and a .gitignore.")
-def init(root: Root = None, verbose: Verbose = False, debug: Debug = False) -> None:
+def init(
+    root: Root = None,
+    collection: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--collection",
+            help="Manage only this collection, by name or entity id. Repeatable.",
+        ),
+    ] = None,
+    verbose: Verbose = False,
+    debug: Debug = False,
+) -> None:
     root = _start(root, verbose, debug)
-    root.mkdir(parents=True, exist_ok=True)
     config = root / CONFIG
+    found = []
+    if collection:
+        with MetabaseClient(load_settings(root)) as client:
+            found = workflow.find_collections(client, collection)
+    listed = "".join(
+        f"  - {eid}  # {' '.join(where.split())}\n" for eid, where in found
+    )
     if config.exists():
-        err.print(f"{config} already exists.", markup=False)
+        if found:
+            err.print(
+                f"{config} already exists. Add these under `collections:`:",
+                markup=False,
+            )
+            err.print(listed.rstrip("\n"), markup=False)
+        else:
+            err.print(f"{config} already exists.", markup=False)
         return
-    config.write_text("removal: archive\n", encoding="utf-8")
+    root.mkdir(parents=True, exist_ok=True)
+    scope = f"collections:\n{listed}" if found else ""
+    config.write_text(f"{scope}removal: archive\n", encoding="utf-8")
     gitignore = root / ".gitignore"
     lines = gitignore.read_text().splitlines() if gitignore.exists() else []
     lines += [line for line in (f"{WORKDIR}/", ".env") if line not in lines]
     gitignore.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if found:
+        err.print(f"Wrote {config}.\n\nNext, run `metabase-sync export`.", markup=False)
+        return
     err.print(
         f"Wrote {config}.\n\n"
-        "Next, set METABASE_URL and METABASE_API_KEY, then run `metabase-sync export`.\n"
-        f"To manage only some collections, list their entity ids under `collections:` "
-        f"in {config}. Each collection's file holds its entity_id after an export.",
+        "Next, set METABASE_URL and METABASE_API_KEY if you haven't, then run "
+        "`metabase-sync export`.\nTo manage only some collections, run "
+        "`metabase-sync init --collection NAME` to look up their entity ids.",
         markup=False,
     )
 
