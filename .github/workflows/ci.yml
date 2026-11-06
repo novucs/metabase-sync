@@ -52,6 +52,19 @@ jobs:
       - name: Run unit tests
         run: uv run pytest tests/ --ignore=tests/integration --ignore=tests/contracts
 
+  oldest:
+    name: Unit tests (Python 3.14, oldest dependencies)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync the oldest allowed dependencies
+        run: uv sync --all-groups --python 3.14 --resolution lowest-direct
+      - name: Run unit tests
+        run: uv run --python 3.14 pytest tests/ --ignore=tests/integration --ignore=tests/contracts
+
   contracts:
     name: Contracts with Metabase's published schemas
     runs-on: ubuntu-latest

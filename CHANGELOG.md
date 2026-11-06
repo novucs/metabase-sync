@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - With `collections` set, snippets are no longer managed; set `snippets: true` in `metabase-sync.yaml` to keep them.
+- Supports Python 3.14 and older versions of its dependencies.
 
 ### Fixed
 

@@ -29,7 +29,7 @@ Plan: 1 to create, 1 to update, 1 to archive.
 uv tool install metabase-sync
 ```
 
-Tested on Metabase 0.58 (LTS), 0.64 (LTS), and 0.65, with Python 3.15. Versions in between, and newer ones, work with a warning. For Metabase 0.55 to 0.57, use metabase-sync 0.3.
+Tested on Metabase 0.58 (LTS), 0.64 (LTS), and 0.65, with Python 3.14 and 3.15. Versions in between, and newer ones, work with a warning. For Metabase 0.55 to 0.57, use metabase-sync 0.3.
 
 ## Quickstart
 
