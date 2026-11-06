@@ -12,14 +12,15 @@ $ metabase-sync plan
 
 plan ← state/
 
-collections: 0 create, 0 update, 12 skip
-cards:       1 create, 1 update, 48 skip
+cards:       1 to add, 1 to change
   CREATE  collections/finance/cards/q4-revenue.sql                  Q4 Revenue — SELECT SUM(revenue) FROM finance.q4
   UPDATE  collections/finance/cards/profit-margin.sql               SQL: 23 → 25 lines, +2 −0
-dashboards:  1 create, 0 update, 8 skip
+dashboards:  1 to add, 1 to destroy
   CREATE  collections/finance/dashboards/q4-review/dashboard.yaml   Q4 Review (1 dashcards)
+  ARCHIVE Finance/Q3 Review                                         dashboard 42
 
-2 create, 1 update, 68 skip
+Plan: 2 to add, 1 to change, 1 to destroy.
+Destroyed items move to the Metabase Trash (restorable).
 run `metabase-sync apply` to apply this plan.
 ```
 
@@ -70,7 +71,7 @@ metabase-sync apply         # write changes
 | --- | --- |
 | `metabase-sync export` | Pull the live instance into the on-disk state tree. |
 | `metabase-sync plan` | Read-only diff. Prints a per-item report and writes `state/.plan.json`. |
-| `metabase-sync apply` | Re-derives the diff and executes it. Idempotent. |
+| `metabase-sync apply` | Re-derives the diff and executes it, archiving remote items absent from `state/`. Idempotent. |
 | `metabase-sync apply --only cards` | Restrict to one resource (`collections,snippets,cards,dashboards,pulses`). |
 | `metabase-sync index` | Debug: print remote resource counts. |
 
@@ -197,7 +198,7 @@ See [`examples/`](examples/) for two GitHub Actions templates:
 ## Round-trip guarantees
 
 - `export` is deterministic: byte-identical output across runs.
-- `plan` against a freshly-exported tree reports `nothing to do.`.
+- `plan` against a freshly-exported tree reports `No changes.`.
 - SQL bodies are byte-faithful — trailing whitespace and template-tag UUIDs survive the round-trip.
 
 ## Caveats
@@ -208,7 +209,7 @@ Before running this on a production Metabase, you should know:
 - **Dashboard contents are a full replacement.** Tabs and dashcards are PUT in one go with client-assigned negative temp ids; the server replaces existing rows and allocates new `dashcard.entity_id`s. Two simultaneous applies race; wrap CI in a concurrency group to serialise them.
 - **Out-of-scope resources are silently NOT synced.** Alerts, segments, legacy metrics, permissions, users and groups are not part of the state tree. `export` prints a warning if it finds any so you don't discover this in production.
 - **Personal collections are excluded.** Cards/dashboards inside a user's personal collection don't appear in the export. Dashboards in shared collections that reference a personal-collection card will fail the reference preflight at plan time, not at apply time.
-- **`--delete` is not yet implemented.** Items removed from `state/` are not auto-archived on apply. Archive them through the UI or directly via the API. Passing `--delete` is rejected with exit code 2.
+- **`state/` is the whole desired state.** Like Terraform, any remote collection, card, dashboard, snippet, or pulse with no file in `state/` is planned as a destroy and moved to the Metabase Trash on apply (restore it in the UI, then `export` to pull it back). Every item is listed and counted; children go before parents. Never touched: personal, Trash, instance-analytics, and sample collections (with their contents), items in collections the API key can't list, databases, and users. `--only` limits destroys to the listed resources. Apply refuses to destroy anything when `state/` holds no items (catches a wrong `--state-dir`).
 
 ### Pre-apply backup
 
@@ -228,7 +229,7 @@ metabase-sync apply --backup-dir /tmp/pre-apply-$(date +%Y%m%d-%H%M%S)
 
 **How do I move a card to another collection?** Move the file. The collection that contains the card is determined by its on-disk path; on apply the collection_id is rebound and Metabase moves it.
 
-**How do I delete a card?** Archive it via the Metabase UI for now. The `--delete` flag is not implemented in this release. After archival, re-export and commit.
+**How do I delete a card?** Delete its file and run `apply`; the card moves to the Metabase Trash.
 
 **`metabase-sync diagnose` to file a bug.** It captures everything we'd ask for in a triage thread. Paste the output into the GitHub issue template.
 
@@ -263,7 +264,6 @@ If something goes wrong, you can `cp -r` the backup over `state/` and re-apply t
 
 ## Limitations
 
-- `--delete` (opt-in archival of items absent from disk) is not yet implemented.
 - Permissions, users, and groups are out of scope.
 - Alerts, legacy metrics, and segments are not yet supported.
 

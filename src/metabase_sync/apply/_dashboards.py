@@ -86,6 +86,7 @@ def apply_dashboards(ctx: ApplyContext) -> None:
             continue
 
         ctx.dashboard_id_by_disk_path[directory.resolve()] = int(remote_dashboard["id"])
+        ctx.claimed.add(("dashboards", int(remote_dashboard["id"])))
         diffs = _metadata_diffs(desired, remote_dashboard)
         contents_diff = _contents_diff(
             doc, remote_dashboard, directory, ctx.card_id_by_disk_path

@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Minor (not patch) because apply now archives remote items absent from
+`state/`, and the plan/apply footers change format.
+
+### Added
+
+- **Terraform-style destroy: remote items with no file in `state/` are
+  archived.** `plan` lists every orphaned collection, card, dashboard,
+  snippet, and pulse as `ARCHIVE` (exit 2, included in `.plan.json`); `apply`
+  moves them to the Metabase Trash, dependents first (pulses → dashboards →
+  cards → snippets → collections, deepest collection first). Personal, Trash,
+  instance-analytics, and sample collections (and their contents), items in
+  collections the API key can't list, databases, and users are never touched;
+  `--only` limits destroys to the listed resources. Apply refuses to destroy
+  anything when `state/` holds no items, which catches a wrong `--state-dir`.
+  ([#1](https://github.com/novucs/metabase-sync/issues/1))
+
+### Changed
+
+- **Plan and apply footers read like Terraform:** `Plan: 1 to add, 4 to
+  change, 0 to destroy.` and `Apply complete! Resources: 1 added, 4 changed,
+  0 destroyed.` A clean plan prints `No changes. Metabase matches the state.`
+- **Per-resource plan lines list only changes:** `cards: 1 to add, 2 to
+  destroy`. Resources with nothing to do and zero counts are omitted (the
+  `skip` action is still recorded in `.plan.json`). Archived items show their
+  remote location, e.g. `ARCHIVE Finance/Q3 Review  dashboard 42`.
+
+### Removed
+
+- **`apply --delete`.** The flag was rejected since 0.1.0; destroy is now the
+  default behaviour.
+
+### Testing
+
+- Unit coverage for orphan detection, ordering, exclusions, `--only`, the
+  empty-state guard, and the summaries (`test_archive.py`); an integration
+  regression that a removed card file plans one destroy, lands in the Trash,
+  and settles (`test_apply_semantics.py::test_removed_file_is_destroyed_and_settles`).
+
 ## [0.3.1] - 2026-10-27
 
 ### Fixed

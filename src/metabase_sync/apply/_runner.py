@@ -1,8 +1,9 @@
 """Orchestrate one plan/apply pass.
 
 `run()` is the single public entry point. It owns the order of operations
-(collections → snippets → cards → dashboards → pulses) and the cross-cutting
-preflights (database existence, card_path resolution, optimistic-concurrency).
+(collections → snippets → cards → dashboards → pulses → archive orphans) and
+the cross-cutting preflights (database existence, card_path resolution,
+optimistic-concurrency).
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from metabase_sync.serialize.databases import read_databases
 from metabase_sync.serialize.pulses import read_pulses
 from metabase_sync.serialize.version import check_stamp
 
+from ._archive import apply_archive
 from ._cards import apply_cards
 from ._collections import apply_collections
 from ._dashboards import apply_dashboards
@@ -49,7 +51,6 @@ def run(
     state_dir: Path,
     *,
     mode: Mode,
-    delete: bool = False,
     only: set[str] | None = None,
     force: bool = False,
     allow_missing_recipients: bool = False,
@@ -91,9 +92,7 @@ def run(
         apply_dashboards(ctx)
     if "pulses" in selected:
         apply_pulses(ctx)
-
-    if delete:
-        raise NotImplementedError("--delete is not yet wired")
+    apply_archive(ctx, selected)
 
     return plan
 

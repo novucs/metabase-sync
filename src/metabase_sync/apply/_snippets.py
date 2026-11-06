@@ -70,6 +70,7 @@ def apply_snippets(ctx: ApplyContext) -> None:
                 write_frontmatter_sql(path, canonical(fm, SNIPPET), body)
             continue
 
+        ctx.claimed.add(("snippets", int(remote_snippet["id"])))
         diffs = diff_fields(
             desired,
             remote_snippet,

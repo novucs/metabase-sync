@@ -93,6 +93,7 @@ def apply_cards(ctx: ApplyContext) -> None:
             continue
 
         ctx.card_id_by_disk_path[path.resolve()] = int(remote_card["id"])
+        ctx.claimed.add(("cards", int(remote_card["id"])))
         diffs = _diff_card(desired, remote_card)
         if diffs:
             dq_changed = any(d[0] in _DATASET_QUERY_DIFF_FIELDS for d in diffs)

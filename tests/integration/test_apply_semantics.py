@@ -108,6 +108,37 @@ def test_plan_no_op_after_export(
         )
 
 
+def test_removed_file_is_destroyed_and_settles(
+    mb: MetabaseAdmin, metabase_url: str, metabase_api_key: str, tmp_path: Path
+) -> None:
+    """Deleting a card file plans exactly one destroy, apply moves the card to
+    the Trash, and a re-plan is clean. Starts from a full export so the rest of
+    the shared server stays claimed."""
+    db = mb.sample_db_name()
+    state = tmp_path / "state"
+    with MetabaseClient(metabase_url, metabase_api_key) as client:
+        run_export(client, state)
+    slug = unique_name("destroy")
+    write_collection(state, slug, slug)
+    write_native_card(state, slug, "keep", unique_name("keep"), "SELECT 1", db)
+    gone = unique_name("gone")
+    gone_sql = write_native_card(state, slug, "gone", gone, "SELECT 2", db)
+    _apply(metabase_url, metabase_api_key, state, mode="apply")
+    card_id = mb.find_card(gone)["id"]
+
+    gone_sql.unlink()
+    plan = _apply(metabase_url, metabase_api_key, state, mode="plan")
+    archives = [c for c in plan.changes if c.action == "archive"]
+    assert [(c.resource, c.name) for c in archives] == [("cards", gone)]
+    assert plan.summary() == "Plan: 0 to add, 0 to change, 1 to destroy."
+
+    applied = _apply(metabase_url, metabase_api_key, state, mode="apply")
+    assert applied.totals()["archive"] == 1
+    assert mb.get_card(card_id)["archived"] is True
+    settled = _apply(metabase_url, metabase_api_key, state, mode="plan")
+    assert settled.total_writes() == 0
+
+
 def test_only_flag_restricts_resource(
     metabase_url: str, metabase_api_key: str, tmp_path: Path
 ) -> None:

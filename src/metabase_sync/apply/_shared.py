@@ -31,6 +31,9 @@ class ApplyContext:
     collection_id_by_disk_path: dict[Path, int] = field(default_factory=dict)
     card_id_by_disk_path: dict[Path, int] = field(default_factory=dict)
     dashboard_id_by_disk_path: dict[Path, int] = field(default_factory=dict)
+    # (resource, remote id) of every remote item a state file matched; the rest
+    # are archived as orphans.
+    claimed: set[tuple[str, int]] = field(default_factory=set)
     allow_missing_recipients: bool = False
 
 

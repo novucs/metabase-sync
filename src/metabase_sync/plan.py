@@ -58,6 +58,25 @@ class Plan:
     def total_writes(self) -> int:
         return sum(1 for c in self.changes if c.action != "skip")
 
+    def totals(self) -> dict[str, int]:
+        out = {"create": 0, "update": 0, "skip": 0, "archive": 0}
+        for c in self.changes:
+            out[c.action] += 1
+        return out
+
+    def summary(self, applied: bool = False) -> str:
+        """Terraform-style one-liner; archive counts as destroy (items go to Trash)."""
+        t = self.totals()
+        if applied:
+            return (
+                f"Apply complete! Resources: {t['create']} added, "
+                f"{t['update']} changed, {t['archive']} destroyed."
+            )
+        return (
+            f"Plan: {t['create']} to add, {t['update']} to change, "
+            f"{t['archive']} to destroy."
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "changes": [asdict(c) for c in self.changes],
@@ -68,42 +87,37 @@ class Plan:
 
 _RESOURCE_ORDER = ("collections", "snippets", "cards", "dashboards", "pulses")
 _ACTION_LABELS = {"create": "CREATE", "update": "UPDATE", "archive": "ARCHIVE"}
+_VERBS = (("create", "add"), ("update", "change"), ("archive", "destroy"))
 
 
 def render_report(plan: Plan, state_dir: Path) -> str:
-    """Human-readable per-item summary for the terminal."""
+    """Human-readable per-item summary for the terminal. Like Terraform, only
+    resources with changes are listed, and only their non-zero counts."""
     counts = plan.counts()
     groups = plan.by_resource()
     lines: list[str] = [f"plan ← {state_dir}", ""]
-    totals = {"create": 0, "update": 0, "skip": 0, "archive": 0}
 
     for resource in _RESOURCE_ORDER:
-        if resource not in counts:
+        changed = [c for c in groups.get(resource, []) if c.action != "skip"]
+        if not changed:
             continue
         c = counts[resource]
-        for k, v in c.items():
-            totals[k] += v
-        lines.append(
-            f"{resource + ':':<13}{c['create']} create, {c['update']} update, "
-            f"{c['skip']} skip" + (f", {c['archive']} archive" if c["archive"] else "")
-        )
-        for change in groups[resource]:
-            if change.action == "skip":
-                continue
+        parts = [f"{c[k]} to {verb}" for k, verb in _VERBS if c[k]]
+        lines.append(f"{resource + ':':<13}" + ", ".join(parts))
+        for change in changed:
             label = _ACTION_LABELS[change.action]
             path_col = f"{change.relpath:<55.55}"
             tail = change.summary or change.name
             lines.append(f"  {label:<7} {path_col}  {tail}")
 
-    lines.append("")
-    suffix = f", {totals['archive']} archive" if totals["archive"] else ""
-    lines.append(
-        f"{totals['create']} create, {totals['update']} update{suffix}, "
-        f"{totals['skip']} skip"
-    )
+    if len(lines) > 2:
+        lines.append("")
     if plan.total_writes() == 0:
-        lines.append("nothing to do.")
+        lines.append("No changes. Metabase matches the state.")
     else:
+        lines.append(plan.summary())
+        if plan.totals()["archive"]:
+            lines.append("Destroyed items move to the Metabase Trash (restorable).")
         lines.append("run `metabase-sync apply` to apply this plan.")
     return "\n".join(lines)
 

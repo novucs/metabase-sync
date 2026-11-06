@@ -91,6 +91,7 @@ def apply_pulses(ctx: ApplyContext) -> None:
                 write_yaml(path, canonical(doc, PULSE, PULSE_CHILDREN))
             continue
 
+        ctx.claimed.add(("pulses", int(remote_pulse["id"])))
         diffs = _pulse_diffs(desired, remote_pulse)
         if diffs:
             ctx.plan.add(

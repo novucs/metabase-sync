@@ -148,11 +148,6 @@ def plan(
 @app.command()
 def apply(
     state_dir: Optional[Path] = typer.Option(None, "--state-dir", "-s"),
-    delete: bool = typer.Option(
-        False,
-        "--delete",
-        help="Archive remote items absent from state/. NOT YET IMPLEMENTED — passing this flag is rejected.",
-    ),
     only: Optional[str] = typer.Option(
         None,
         "--only",
@@ -181,15 +176,10 @@ def apply(
         "If apply trashes something, restore via `--state-dir <backup>`.",
     ),
 ) -> None:
-    """Push the state tree to Metabase. Re-derives the diff at execution time."""
-    if delete:
-        # Reject before any HTTP call so a partial apply can't precede the NotImplementedError.
-        raise typer.BadParameter(
-            "--delete is not yet implemented. "
-            "Run without --delete and archive orphans manually for now.",
-            param_hint="--delete",
-        )
+    """Push the state tree to Metabase. Re-derives the diff at execution time.
 
+    Remote items absent from state/ are archived (moved to the Trash).
+    """
     from metabase_sync.apply import run
     from metabase_sync.plan import render_report
 
@@ -233,7 +223,7 @@ def apply(
     last_apply_path.write_text(
         json.dumps(executed.to_dict(), indent=2, default=str), encoding="utf-8"
     )
-    typer.echo(f"\napplied. audit log: {last_apply_path}")
+    typer.echo(f"\n{executed.summary(applied=True)}\naudit log: {last_apply_path}")
 
 
 @app.command()

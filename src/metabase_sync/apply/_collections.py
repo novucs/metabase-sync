@@ -62,6 +62,7 @@ def apply_collections(ctx: ApplyContext) -> None:
         ctx.collection_id_by_disk_path[directory.resolve()] = int(
             remote_collection["id"]
         )
+        ctx.claimed.add(("collections", int(remote_collection["id"])))
         diffs = diff_fields(
             desired,
             remote_collection,
