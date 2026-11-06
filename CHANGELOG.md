@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-06
+
 ### Changed
 
 - `export` now works like `apply` in reverse. It makes the files match Metabase, lists the files it will change, and asks first. It marks any file where it would overwrite an edit you haven't applied. Use `--auto-approve` in CI. Files that aren't in Metabase are left as they are.
